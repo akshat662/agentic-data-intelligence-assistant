@@ -16,6 +16,8 @@ dependencies = [
     "numpy>=1.26",
     "duckdb>=1.0",
     "pyarrow>=16.0",
+    # SQL parsing / guarding
+    "sqlglot>=25.0",
 ]
 
 [dependency-groups]
