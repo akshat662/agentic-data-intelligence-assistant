@@ -6,15 +6,18 @@ itself.
 """
 
 from adia.tools.duckdb_client import build_connection, execute_query
+from adia.tools.profile_dataset import ProfileDatasetArgs, profile_dataset
 from adia.tools.run_sql import RunSqlArgs, run_sql
 from adia.tools.sql_guard import GuardedQuery, SqlGuardError, check_sql
 
 __all__ = [
     "GuardedQuery",
+    "ProfileDatasetArgs",
     "RunSqlArgs",
     "SqlGuardError",
     "build_connection",
     "check_sql",
     "execute_query",
+    "profile_dataset",
     "run_sql",
 ]
