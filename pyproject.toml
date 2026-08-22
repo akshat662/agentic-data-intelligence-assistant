@@ -18,6 +18,8 @@ dependencies = [
     "pyarrow>=16.0",
     # SQL parsing / guarding
     "sqlglot>=25.0",
+    # Machine learning
+    "scikit-learn>=1.4",
 ]
 
 [dependency-groups]

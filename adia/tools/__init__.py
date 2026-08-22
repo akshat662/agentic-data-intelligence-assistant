@@ -5,19 +5,28 @@ callable and testable on its own, per ADIA's core thesis that the LLM never comp
 itself.
 """
 
+from adia.tools.compare_groups import CompareGroupsArgs, compare_groups
+from adia.tools.correlation import ComputeCorrelationArgs, compute_correlation
 from adia.tools.duckdb_client import build_connection, execute_query
+from adia.tools.ml_model import TrainModelArgs, train_model
 from adia.tools.profile_dataset import ProfileDatasetArgs, profile_dataset
 from adia.tools.run_sql import RunSqlArgs, run_sql
 from adia.tools.sql_guard import GuardedQuery, SqlGuardError, check_sql
 
 __all__ = [
+    "CompareGroupsArgs",
+    "ComputeCorrelationArgs",
     "GuardedQuery",
     "ProfileDatasetArgs",
     "RunSqlArgs",
     "SqlGuardError",
+    "TrainModelArgs",
     "build_connection",
     "check_sql",
+    "compare_groups",
+    "compute_correlation",
     "execute_query",
     "profile_dataset",
     "run_sql",
+    "train_model",
 ]
