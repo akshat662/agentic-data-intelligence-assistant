@@ -7,11 +7,13 @@ Tool execution, evidence handling, and validation live outside this package (`ad
 
 from adia.agents.feasibility import assess_feasibility
 from adia.agents.llm_config import DEFAULT_MODEL, LLMSettings, MissingApiKeyError, load_llm_settings
+from adia.agents.planner import create_plan
 
 __all__ = [
     "DEFAULT_MODEL",
     "LLMSettings",
     "MissingApiKeyError",
     "assess_feasibility",
+    "create_plan",
     "load_llm_settings",
 ]

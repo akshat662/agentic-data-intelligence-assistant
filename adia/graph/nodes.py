@@ -1,29 +1,30 @@
 """Node functions for the ADIA workflow graph.
 
-`feasibility_node` calls a real LLM agent (`adia.agents.feasibility.assess_feasibility`);
-every other node here remains a deterministic placeholder doing real work with the existing
+`feasibility_node` and `planner_node` call real LLM agents
+(`adia.agents.feasibility.assess_feasibility`, `adia.agents.planner.create_plan`); every
+other node here remains a deterministic placeholder doing real work with the existing
 Phase 1/2 infrastructure (dataset registry, tools, evidence store, renderer, static
 validator) — none of it is a no-op stub. What's still missing from those is *judgment*:
-choosing a plan, deciding what a number means, writing prose. Each node's docstring says
-exactly what an LLM will replace it with next, and why the current version is a defensible
-placeholder rather than a fake one.
+deciding what a number means, writing prose. Each node's docstring says exactly what an LLM
+will replace it with next, and why the current version is a defensible placeholder rather
+than a fake one.
 
 No node here raises: every external call — LLM or otherwise — is wrapped so a failure
-becomes a state update (an error, an infeasible verdict), never an exception the graph has
-to handle.
+becomes a state update (an error, an infeasible verdict, an empty plan), never an exception
+the graph has to handle.
 """
 
 from pathlib import Path
 from typing import Any
 
 from adia.agents.feasibility import assess_feasibility
+from adia.agents.planner import create_plan
 from adia.data.catalog import build_catalog
 from adia.data.loader import load_dataset
 from adia.data.registry import get_dataset_config, load_registry
 from adia.evidence.renderer import render_evidence
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolError, ToolErrorKind
-from adia.models.plan import PlanStep
 from adia.models.state import AgentState, FeasibilityResult, FeasibilityVerdict
 from adia.tools.profile_dataset import profile_dataset
 from adia.validate.static import validate_answer
@@ -83,28 +84,20 @@ def feasibility_node(state: AgentState) -> dict[str, Any]:
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:
-    """Emit a fixed, single-step plan: always profile the dataset first.
+    """Ask the planner agent for a plan, already validated against the tool surface.
 
-    An LLM-driven planner will replace this with a DAG of up to 6 steps built from the
-    question and catalog (`adia/models/plan.py`'s `PlanStep` is already that contract — this
-    node only ever produces one instance of it). Profiling first is not an arbitrary
-    placeholder choice: the project's own design already treats it as the step a planner is
-    "required to call first on any non-trivial question," so a fixed one-step plan is the
-    smallest defensible plan, not a stand-in for a smarter one that does something different.
+    `create_plan` (`adia.agents.planner`) does the real work: it asks an LLM for a short
+    sequence of steps and validates every one of them in Python (supported tool family,
+    resolvable dependencies) before any `PlanStep` reaches this return value. It also skips
+    the LLM call entirely — returning an empty plan — when `state.feasibility.verdict` isn't
+    `FEASIBLE`, so a question already ruled out never gets planned for.
 
-    Produces no plan if `feasibility_node` did not populate a catalog.
+    Produces no plan if `feasibility_node` did not populate a catalog or feasibility result.
     """
-    if state.catalog is None:
+    if state.catalog is None or state.feasibility is None:
         return {}
-    step = PlanStep(
-        id="step_1",
-        intent="Profile the dataset to establish its shape before any deeper analysis.",
-        tool_family=_SUPPORTED_TOOL_FAMILY,
-        depends_on=[],
-        expected_output="Dataset-level and column-level summary statistics.",
-        success_criteria="profile_dataset returns ok=True.",
-    )
-    return {"plan": [step]}
+    plan = create_plan(state.question, state.catalog, state.feasibility)
+    return {"plan": plan}
 
 
 def execute_tools_node(state: AgentState) -> dict[str, Any]:

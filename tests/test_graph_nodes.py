@@ -93,15 +93,36 @@ class TestFeasibilityNode:
 
 
 class TestPlannerNode:
-    def test_produces_profile_dataset_step_when_feasible(self, superstore_catalog):
+    def test_calls_planner_agent_when_feasible(self, superstore_catalog, monkeypatch):
+        expected_plan = [
+            PlanStep(
+                id="step_1",
+                intent="Profile it.",
+                tool_family="profile_dataset",
+                expected_output="stats",
+                success_criteria="ok",
+            )
+        ]
+        monkeypatch.setattr("adia.graph.nodes.create_plan", lambda *a, **k: expected_plan)
         state = create_initial_state("How many rows?", "superstore")
-        state = state.model_copy(update={"catalog": superstore_catalog})
+        state = state.model_copy(
+            update={
+                "catalog": superstore_catalog,
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.FEASIBLE, reason="mocked"
+                ),
+            }
+        )
         update = planner_node(state)
-        assert len(update["plan"]) == 1
-        assert update["plan"][0].tool_family == "profile_dataset"
+        assert update["plan"] == expected_plan
 
     def test_produces_no_plan_without_catalog(self):
         state = create_initial_state("How many rows?", "superstore")
+        assert planner_node(state) == {}
+
+    def test_produces_no_plan_without_feasibility_result(self, superstore_catalog):
+        state = create_initial_state("How many rows?", "superstore")
+        state = state.model_copy(update={"catalog": superstore_catalog})
         assert planner_node(state) == {}
 
 
