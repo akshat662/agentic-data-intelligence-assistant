@@ -9,12 +9,16 @@ put to use for caching, lookup, and search.
 
 from adia.evidence.ids import compute_args_hash, generate_evidence_id
 from adia.evidence.persistence import load_evidence_list, save_evidence_list
+from adia.evidence.renderer import RenderedEvidence, render_evidence, render_evidence_context
 from adia.evidence.store import EvidenceStore
 
 __all__ = [
     "EvidenceStore",
+    "RenderedEvidence",
     "compute_args_hash",
     "generate_evidence_id",
     "load_evidence_list",
+    "render_evidence",
+    "render_evidence_context",
     "save_evidence_list",
 ]
