@@ -11,9 +11,11 @@ from adia.data.catalog import build_catalog
 from adia.data.loader import load_dataset
 from adia.evidence.store import EvidenceStore
 from adia.graph.nodes import (
+    VALIDATION_FALLBACK_ANSWER,
     execute_tools_node,
     feasibility_node,
     planner_node,
+    refusal_node,
     synthesizer_node,
     validation_node,
 )
@@ -148,7 +150,7 @@ class TestExecuteToolsNode:
         step = PlanStep(
             id="step_1",
             intent="Compare.",
-            tool_family="compare_groups",
+            tool_family="magic_tool",
             expected_output="group stats",
             success_criteria="ok",
         )
@@ -260,39 +262,39 @@ class TestExecuteToolsNode:
 
 class TestSynthesizerNode:
     def test_no_evidence_produces_honest_placeholder(self):
+        # No evidence short-circuits inside synthesize_answer itself, before any LLM call, so
+        # this is safe to run without mocking anything.
         state = create_initial_state("How many rows?", "superstore")
         update = synthesizer_node(state)
         assert "No evidence was collected" in update["draft_answer"]
         assert update["draft_answer"] == update["rendered_answer"]
 
-    def test_evidence_produces_citation_bearing_draft(self, superstore_catalog):
-        state = create_initial_state("How many rows?", "superstore")
-        state = state.model_copy(update={"catalog": superstore_catalog})
+    def test_calls_synthesizer_agent_with_rendered_context(self, superstore_catalog, monkeypatch):
         store = EvidenceStore()
         from adia.tools.profile_dataset import profile_dataset
 
         result = profile_dataset("superstore", "data/superstore.csv", store)
         evidence = {result.evidence_id: store.get(result.evidence_id)}
-        state = state.model_copy(update={"evidence": evidence})
-        update = synthesizer_node(state)
-        assert f"[[{result.evidence_id}]]" in update["draft_answer"]
+        expected_answer = f"The dataset has been profiled [[{result.evidence_id}]]."
 
-    def test_evidence_with_no_scalar_values_is_reported_honestly(self):
-        args = {"dataset_id": "superstore", "source_path": "data/superstore.csv"}
-        from adia.evidence.ids import compute_args_hash, generate_evidence_id
+        captured = {}
 
-        empty_evidence = Evidence(
-            id=generate_evidence_id("profile_dataset", args),
-            tool="profile_dataset",
-            data={},
-            provenance=Provenance(
-                tool_name="profile_dataset", args=args, args_hash=compute_args_hash(args)
-            ),
-        )
+        def _fake_synthesize(question, evidence_context, evidence_map):
+            captured["question"] = question
+            captured["evidence_context"] = evidence_context
+            captured["evidence_map"] = evidence_map
+            return expected_answer
+
+        monkeypatch.setattr("adia.graph.nodes.synthesize_answer", _fake_synthesize)
         state = create_initial_state("How many rows?", "superstore")
-        state = state.model_copy(update={"evidence": {empty_evidence.id: empty_evidence}})
+        state = state.model_copy(update={"catalog": superstore_catalog, "evidence": evidence})
         update = synthesizer_node(state)
-        assert "reported no scalar values" in update["draft_answer"]
+
+        assert update["draft_answer"] == expected_answer
+        assert update["draft_answer"] == update["rendered_answer"]
+        assert captured["question"] == "How many rows?"
+        assert result.evidence_id in captured["evidence_context"]
+        assert captured["evidence_map"] == evidence
 
 
 class TestValidationNode:
@@ -303,14 +305,67 @@ class TestValidationNode:
         assert update["validation"].passed is True
         assert update["final_answer"] == "No numeric claims here."
 
-    def test_ungrounded_answer_fails_and_clears_final_answer(self):
+    def test_ungrounded_answer_fails_and_produces_deterministic_fallback(self):
         state = create_initial_state("How many rows?", "superstore")
         state = state.model_copy(update={"rendered_answer": "Revenue was 999999.99."})
         update = validation_node(state)
         assert update["validation"].passed is False
-        assert update["final_answer"] is None
+        assert update["final_answer"] == VALIDATION_FALLBACK_ANSWER
 
     def test_handles_missing_rendered_answer(self):
         state = create_initial_state("How many rows?", "superstore")
         update = validation_node(state)
         assert update["validation"].passed is True
+
+
+class TestRefusalNode:
+    def test_composes_refusal_from_feasibility_reason(self):
+        state = create_initial_state("Will sales grow next year?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.INFEASIBLE,
+                    reason="No forecasting data exists.",
+                )
+            }
+        )
+        update = refusal_node(state)
+        assert "No forecasting data exists." in update["draft_answer"]
+        assert update["draft_answer"] == update["rendered_answer"]
+        assert update["refusal"].verdict == FeasibilityVerdict.INFEASIBLE
+
+    def test_includes_missing_columns_and_capabilities(self):
+        state = create_initial_state("Sales by employee?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.INFEASIBLE,
+                    reason="Column does not exist.",
+                    missing_columns=["Employee Name"],
+                    missing_capabilities=["forecasting"],
+                )
+            }
+        )
+        update = refusal_node(state)
+        assert "Employee Name" in update["draft_answer"]
+        assert "forecasting" in update["draft_answer"]
+
+    def test_no_feasibility_result_is_a_no_op(self):
+        state = create_initial_state("How many rows?", "superstore")
+        assert refusal_node(state) == {}
+
+    def test_refusal_answer_passes_static_validation(self):
+        state = create_initial_state("Will sales grow next year?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.INFEASIBLE,
+                    reason="No forecasting data exists.",
+                )
+            }
+        )
+        update = refusal_node(state)
+        state = state.model_copy(update=update)
+        validation_update = validation_node(state)
+        assert validation_update["validation"].passed is True
+        assert validation_update["final_answer"] == update["rendered_answer"]

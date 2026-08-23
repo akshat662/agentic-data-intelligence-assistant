@@ -97,3 +97,62 @@ class TestRenderEvidenceContext:
 
     def test_empty_list_returns_empty_string(self):
         assert render_evidence_context([]) == ""
+
+
+class TestSmallListExpansion:
+    """Lists with ≤10 items expose scalar values inline for the synthesizer."""
+
+    def test_small_list_exposes_scalar_values(self):
+        rows = [
+            {"Category": "Technology", "total_sales": 836154},
+            {"Category": "Furniture", "total_sales": 741999},
+        ]
+        ev = _make_evidence("run_sql", {"query": "select * from orders"}, {"rows": rows})
+        rendered = render_evidence(ev)
+        assert rendered.key_values["rows_count"] == 2
+        assert rendered.key_values["rows[0].Category"] == "Technology"
+        assert rendered.key_values["rows[0].total_sales"] == 836154
+        assert rendered.key_values["rows[1].Category"] == "Furniture"
+        assert rendered.key_values["rows[1].total_sales"] == 741999
+
+    def test_large_list_stays_count_only(self):
+        rows = [{"price": i} for i in range(50)]
+        ev = _make_evidence("run_sql", {"query": "select * from orders"}, {"rows": rows})
+        rendered = render_evidence(ev)
+        assert rendered.key_values["rows_count"] == 50
+        # No expanded items for large lists.
+        assert "rows[0].price" not in rendered.key_values
+
+    def test_boundary_exactly_ten_items_expands(self):
+        rows = [{"val": i} for i in range(10)]
+        ev = _make_evidence("run_sql", {"query": "select * from orders"}, {"rows": rows})
+        rendered = render_evidence(ev)
+        assert rendered.key_values["rows_count"] == 10
+        assert rendered.key_values["rows[0].val"] == 0
+        assert rendered.key_values["rows[9].val"] == 9
+
+    def test_boundary_eleven_items_does_not_expand(self):
+        rows = [{"val": i} for i in range(11)]
+        ev = _make_evidence("run_sql", {"query": "select * from orders"}, {"rows": rows})
+        rendered = render_evidence(ev)
+        assert rendered.key_values["rows_count"] == 11
+        assert "rows[0].val" not in rendered.key_values
+
+    def test_expanded_values_appear_in_summary_text(self):
+        rows = [{"Category": "Technology", "total_sales": 836154}]
+        ev = _make_evidence("run_sql", {"query": "q"}, {"rows": rows})
+        rendered = render_evidence(ev)
+        assert "836154" in rendered.summary
+        assert "Technology" in rendered.summary
+
+    def test_expansion_is_deterministic(self):
+        rows = [
+            {"a": 1, "b": 2},
+            {"a": 3, "b": 4},
+        ]
+        ev = _make_evidence("run_sql", {"query": "q"}, {"rows": rows})
+        r1 = render_evidence(ev)
+        r2 = render_evidence(ev)
+        assert r1.summary == r2.summary
+        assert r1.key_values == r2.key_values
+

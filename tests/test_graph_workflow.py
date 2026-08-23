@@ -7,8 +7,9 @@ is required to run this suite.
 
 from langgraph.graph.state import CompiledStateGraph
 
+from adia.graph.nodes import VALIDATION_FALLBACK_ANSWER
 from adia.graph.state import create_initial_state
-from adia.graph.workflow import build_graph, run_graph
+from adia.graph.workflow import build_graph, route_after_feasibility, run_graph
 from adia.models.plan import PlanStep
 from adia.models.state import AgentState, FeasibilityResult, FeasibilityVerdict
 
@@ -35,6 +36,15 @@ def _mock_planner(monkeypatch, *, tool_family="profile_dataset"):
                 success_criteria="ok",
             )
         ]
+
+    monkeypatch.setattr("adia.graph.nodes.create_plan", _plan)
+
+
+def _fail_if_planner_called(monkeypatch):
+    """Patch the planner agent to blow up if it's ever invoked -- proves routing skipped it."""
+
+    def _plan(question, catalog, feasibility):
+        raise AssertionError("create_plan should not be called on the refusal path")
 
     monkeypatch.setattr("adia.graph.nodes.create_plan", _plan)
 
@@ -75,7 +85,7 @@ class TestBuildGraph:
         graph = build_graph()
         assert isinstance(graph, CompiledStateGraph)
 
-    def test_graph_has_all_five_nodes(self):
+    def test_graph_has_all_six_nodes(self):
         graph = build_graph()
         node_names = set(graph.get_graph().nodes) - {"__start__", "__end__"}
         assert node_names == {
@@ -84,7 +94,47 @@ class TestBuildGraph:
             "execute_tools",
             "synthesizer",
             "validation",
+            "refusal",
         }
+
+
+class TestRouteAfterFeasibility:
+    def test_feasible_verdict_routes_to_planner(self):
+        state = create_initial_state("q?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.FEASIBLE, reason="ok"
+                )
+            }
+        )
+        assert route_after_feasibility(state) == "planner"
+
+    def test_infeasible_verdict_routes_to_refusal(self):
+        state = create_initial_state("q?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.INFEASIBLE, reason="no"
+                )
+            }
+        )
+        assert route_after_feasibility(state) == "refusal"
+
+    def test_needs_clarification_verdict_routes_to_refusal(self):
+        state = create_initial_state("q?", "superstore")
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.NEEDS_CLARIFICATION, reason="ambiguous"
+                )
+            }
+        )
+        assert route_after_feasibility(state) == "refusal"
+
+    def test_missing_feasibility_result_routes_to_refusal(self):
+        state = create_initial_state("q?", "superstore")
+        assert route_after_feasibility(state) == "refusal"
 
 
 class TestRunGraphEndToEnd:
@@ -134,29 +184,48 @@ class TestRunGraphEndToEnd:
         assert result.evidence == {}
         assert result.validation is not None
         assert result.validation.passed is True
-        assert result.final_answer is not None  # the honest "no evidence" placeholder
+        assert result.final_answer is not None
+        assert result.refusal is not None
+        assert "cannot be answered" in result.final_answer
 
-    def test_agent_infeasible_verdict_still_completes_the_graph(self, monkeypatch):
-        # The graph stays strictly linear in this phase (no conditional routing on
-        # feasibility yet) -- an INFEASIBLE agent verdict must not crash or skip nodes. No
-        # planner mock is needed: create_plan itself refuses to plan for a non-FEASIBLE
-        # verdict, without calling the LLM at all -- the empty plan below is that guard
-        # firing, not a fallback from a missing API key.
+    def test_feasible_question_follows_planner_path(self, monkeypatch):
+        _mock_feasible(monkeypatch)
+        _mock_planner(monkeypatch)
+        result = run_graph(create_initial_state("How many rows?", "superstore"))
+        assert result.feasibility.verdict == FeasibilityVerdict.FEASIBLE
+        assert len(result.plan) == 1
+        assert result.plan[0].tool_family == "profile_dataset"
+        assert len(result.evidence) == 1  # execute_tools_node ran the mocked plan for real
+        assert result.refusal is None
+
+    def test_infeasible_question_skips_planner_entirely(self, monkeypatch):
+        # Proves the *routing* skips planner_node, not just that create_plan happens to
+        # refuse internally -- create_plan would raise if it were ever called at all.
         _mock_infeasible(monkeypatch, missing_capabilities=["forecasting"])
+        _fail_if_planner_called(monkeypatch)
         result = run_graph(create_initial_state("Will sales grow next year?", "superstore"))
         assert result.feasibility.verdict == FeasibilityVerdict.INFEASIBLE
         assert result.feasibility.missing_capabilities == ["forecasting"]
         assert result.plan == []
+        assert result.evidence == {}
         assert result.validation is not None
         assert result.validation.passed is True
+        assert result.refusal is not None
+        assert result.refusal.missing_capabilities == ["forecasting"]
 
-    def test_graph_execution_with_mocked_planner_produces_expected_plan(self, monkeypatch):
+    def test_validation_failure_produces_deterministic_fallback(self, monkeypatch):
         _mock_feasible(monkeypatch)
         _mock_planner(monkeypatch)
+        # An ungrounded synthesizer proposal -- a bare numeral with no citation -- must never
+        # reach final_answer; validation_node must catch it and substitute the fixed fallback.
+        monkeypatch.setattr(
+            "adia.graph.nodes.synthesize_answer",
+            lambda question, context, evidence: "Revenue was 999999.99.",
+        )
         result = run_graph(create_initial_state("How many rows?", "superstore"))
-        assert len(result.plan) == 1
-        assert result.plan[0].tool_family == "profile_dataset"
-        assert len(result.evidence) == 1  # execute_tools_node ran the mocked plan for real
+        assert result.validation is not None
+        assert result.validation.passed is False
+        assert result.final_answer == VALIDATION_FALLBACK_ANSWER
 
     def test_planner_proposing_unsupported_tool_family_is_caught_downstream(self, monkeypatch):
         # create_plan itself would reject an unsupported tool_family, but this proves

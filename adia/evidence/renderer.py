@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from adia.models.evidence import Evidence
 
 _MAX_SUMMARY_VALUES = 20
+_SMALL_LIST_THRESHOLD = 10
 
 
 class RenderedEvidence(BaseModel):
@@ -121,5 +122,10 @@ def _walk_summary(node: Any, prefix: str, values: dict[str, Any], max_items: int
                 return
     elif isinstance(node, list):
         values[f"{prefix}_count" if prefix else "count"] = len(node)
-    elif isinstance(node, bool | int | float | str) or node is None:
+        if len(node) <= _SMALL_LIST_THRESHOLD:
+            for i, item in enumerate(node):
+                if len(values) >= max_items:
+                    return
+                _walk_summary(item, f"{prefix}[{i}]" if prefix else f"[{i}]", values, max_items)
+    elif isinstance(node, (bool, int, float, str)) or node is None:
         values[prefix] = node

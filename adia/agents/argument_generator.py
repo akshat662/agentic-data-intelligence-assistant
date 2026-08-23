@@ -1,21 +1,5 @@
-"""Tool argument generation: converts a validated PlanStep into validated `run_sql` arguments.
-
-`generate_tool_arguments` asks an LLM to propose a SQL query for a `run_sql` PlanStep, given
-the step's intent and the dataset's catalog. It never lets that proposal reach DuckDB as-is:
-the raw response is first checked against a private, minimal schema (`_RunSqlLLMOutput`), then
-explicitly checked for a non-blank `query`, and finally passed through the existing
-`adia.tools.sql_guard.check_sql` guard -- the same guard `run_sql` itself applies -- before
-anything is returned. A missing query, a hallucinated table/column, a destructive statement, or
-any other guard rejection collapses the whole result to `None` rather than returning a
-partially-trusted query. Any failure to reach the LLM at all also degrades to `None`, the same
-"never crash a run" contract every other agent in this system follows.
-
-Scope: only `run_sql` is supported. A `PlanStep` naming any other `tool_family` is rejected
-immediately, without an LLM call -- generating arguments for `compare_groups`,
-`compute_correlation`, or `train_model` is out of scope for this phase.
-"""
-
 from collections.abc import Callable
+from typing import Any, Literal, Union
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -24,40 +8,56 @@ from pydantic import BaseModel, ConfigDict, Field
 from adia.agents.llm_config import load_llm_settings
 from adia.models.catalog import DatasetCatalog
 from adia.models.plan import PlanStep
+from adia.tools.compare_groups import CompareGroupsArgs
+from adia.tools.correlation import ComputeCorrelationArgs
+from adia.tools.ml_model import TrainModelArgs
 from adia.tools.run_sql import RunSqlArgs
 from adia.tools.sql_guard import check_sql
 
-#: The only `tool_family` this module knows how to generate arguments for.
-_SUPPORTED_TOOL_FAMILY = "run_sql"
+#: The tool families this module knows how to generate arguments for.
+_SUPPORTED_TOOL_FAMILIES = frozenset({"run_sql", "compare_groups", "compute_correlation", "train_model"})
 
 _SYSTEM_PROMPT = (
-    "You are the SQL argument-generation component of a data analysis system. Given one plan "
-    "step's intent and a dataset's exact catalog, propose a single read-only SQL SELECT query "
-    "that fulfills the step's intent.\n\n"
+    "You are the argument-generation component of a data analysis system. Given one plan "
+    "step's intent and a dataset's exact catalog, propose the precise arguments needed to "
+    "run the tool assigned to this step.\n\n"
     "Rules:\n"
-    "- Reference exactly one table, named after the dataset_id given below.\n"
     "- Only reference columns that appear verbatim in the catalog. Never invent, guess, or "
     "assume a column exists.\n"
-    "- Propose only a single SELECT statement (CTEs are fine). Never propose INSERT, UPDATE, "
-    "DELETE, DROP, ALTER, CREATE, or any statement that isn't a read-only SELECT.\n"
-    "- Do not include a trailing semicolon or multiple statements."
+    "- For run_sql: Propose a single read-only SELECT statement. Reference exactly one table, named after the dataset_id given below. Do not include a trailing semicolon or multiple statements.\n"
+    "- For compare_groups: Propose a categorical group_column and a numeric metric_column.\n"
+    "- For compute_correlation: Propose a list of numeric columns to correlate, or null to correlate all numeric columns.\n"
+    "- For train_model: Propose a target_column, a list of feature_columns, the task_type (classification or regression), and the model_type.\n"
+    "  - classification models: 'logistic_regression', 'random_forest_classifier'\n"
+    "  - regression models: 'linear_regression', 'random_forest_regressor'\n"
 )
 
 
 class _RunSqlLLMOutput(BaseModel):
-    """Raw, unverified shape the LLM is asked to produce.
-
-    Never returned to a caller directly -- `generate_tool_arguments` checks `query` is
-    non-blank and then re-validates it in full through `sql_guard.check_sql` before trusting it.
-    """
-
     model_config = ConfigDict(frozen=True)
-
     query: str = Field(default="", description="A single read-only SELECT statement.")
 
+class _CompareGroupsLLMOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    group_column: str = Field(description="Categorical column to group by.")
+    metric_column: str = Field(description="Numeric column to compare across groups.")
+
+class _ComputeCorrelationLLMOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    columns: list[str] | None = Field(default=None, description="Numeric columns to correlate, or null for all numeric.")
+
+class _TrainModelLLMOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    target_column: str = Field(description="Column to predict.")
+    feature_columns: list[str] = Field(description="Numeric columns to use as features.")
+    task_type: Literal["classification", "regression"] = Field(description="The type of machine learning task.")
+    model_type: str = Field(description="The model type (e.g. logistic_regression, random_forest_classifier, linear_regression, random_forest_regressor).")
+
+
+OutputArgs = Union[RunSqlArgs, CompareGroupsArgs, ComputeCorrelationArgs, TrainModelArgs]
 
 #: Signature every `llm_call` -- real or a test's fake -- must satisfy.
-LLMCall = Callable[[PlanStep, DatasetCatalog], _RunSqlLLMOutput]
+LLMCall = Callable[[PlanStep, DatasetCatalog], Any]
 
 
 def generate_tool_arguments(
@@ -66,60 +66,91 @@ def generate_tool_arguments(
     dataset_id: str,
     *,
     llm_call: LLMCall | None = None,
-) -> RunSqlArgs | None:
-    """Propose and validate `run_sql` arguments for one plan step.
+) -> OutputArgs | None:
+    """Propose and validate arguments for one plan step.
 
     Args:
-        step: The plan step to generate arguments for. Only `tool_family == 'run_sql'` is
-            supported; anything else returns `None` without an LLM call.
-        catalog: The dataset's catalog -- the only thing the LLM is shown about the data, and
-            what its proposed query is validated against.
-        dataset_id: The dataset (and therefore table) this query must be scoped to.
-        llm_call: Override for the LLM call, e.g. a fake for tests. Defaults to a real OpenAI
-            call built from `adia.agents.llm_config.load_llm_settings`.
+        step: The plan step to generate arguments for.
+        catalog: The dataset's catalog.
+        dataset_id: The dataset this query must be scoped to.
+        llm_call: Override for the LLM call, e.g. a fake for tests.
 
     Returns:
-        Validated `RunSqlArgs` wrapping a guarded, safe-to-execute query, or `None` if the step
-        isn't a `run_sql` step, the LLM couldn't be reached, its proposal had no query, or the
-        proposed query failed `sql_guard` (unknown table, unknown column, destructive
-        statement, multi-statement, or any other guard rejection).
+        Validated arguments wrapping a safe-to-execute query/config, or `None` if the step
+        isn't supported, the LLM couldn't be reached, or the proposed arguments failed validation.
     """
-    if step.tool_family != _SUPPORTED_TOOL_FAMILY:
+    if step.tool_family not in _SUPPORTED_TOOL_FAMILIES:
         return None
 
     resolved_call = llm_call or _call_openai
     try:
         raw = resolved_call(step, catalog)
-        return _build_args(raw, catalog=catalog, dataset_id=dataset_id)
+        return _build_args(raw, step.tool_family, catalog=catalog, dataset_id=dataset_id)
     except Exception:  # the LLM is never trusted to be reachable or well-behaved
         return None
 
 
-def _build_args(raw: _RunSqlLLMOutput, *, catalog: DatasetCatalog, dataset_id: str) -> RunSqlArgs:
-    """Validate a raw LLM proposal and convert it into trusted, guarded `RunSqlArgs`.
+def _build_args(raw: Any, tool_family: str, *, catalog: DatasetCatalog, dataset_id: str) -> OutputArgs:
+    """Validate a raw LLM proposal and convert it into trusted, guarded arguments."""
+    if tool_family == "run_sql":
+        query = raw.query.strip()
+        if not query:
+            raise ValueError("LLM did not propose a SQL query.")
+        guarded = check_sql(query, catalog=catalog, table_name=dataset_id)
+        return RunSqlArgs(query=guarded.sql)
 
-    Raises:
-        ValueError: If the LLM proposed no query (blank or whitespace-only).
-        SqlGuardError: If the proposed query fails `sql_guard.check_sql` (unknown table,
-            unknown column, non-SELECT statement, or multiple statements).
-    """
-    query = raw.query.strip()
-    if not query:
-        raise ValueError("LLM did not propose a SQL query.")
+    elif tool_family == "compare_groups":
+        if raw.group_column not in catalog.column_names():
+            raise ValueError(f"Unknown group_column: {raw.group_column}")
+        if raw.metric_column not in catalog.column_names():
+            raise ValueError(f"Unknown metric_column: {raw.metric_column}")
+        return CompareGroupsArgs(
+            dataset_id=dataset_id,
+            source_path=catalog.source_path,
+            group_column=raw.group_column,
+            metric_column=raw.metric_column
+        )
 
-    guarded = check_sql(query, catalog=catalog, table_name=dataset_id)
-    return RunSqlArgs(query=guarded.sql)
+    elif tool_family == "compute_correlation":
+        if raw.columns is not None:
+            for col in raw.columns:
+                if col not in catalog.column_names():
+                    raise ValueError(f"Unknown column: {col}")
+        return ComputeCorrelationArgs(
+            dataset_id=dataset_id,
+            source_path=catalog.source_path,
+            columns=raw.columns
+        )
+
+    elif tool_family == "train_model":
+        if raw.target_column not in catalog.column_names():
+            raise ValueError(f"Unknown target_column: {raw.target_column}")
+        for col in raw.feature_columns:
+            if col not in catalog.column_names():
+                raise ValueError(f"Unknown feature column: {col}")
+        return TrainModelArgs(
+            dataset_id=dataset_id,
+            source_path=catalog.source_path,
+            target_column=raw.target_column,
+            feature_columns=raw.feature_columns,
+            task_type=raw.task_type,
+            model_type=raw.model_type
+        )
+    raise ValueError(f"Unsupported tool family: {tool_family}")
 
 
-def _call_openai(step: PlanStep, catalog: DatasetCatalog) -> _RunSqlLLMOutput:
-    """The real LLM call: build a `ChatOpenAI` client from the environment and invoke it.
-
-    Raises whatever `load_llm_settings` or the API call itself raises --
-    `generate_tool_arguments` is responsible for catching that, not this function.
-    """
+def _call_openai(step: PlanStep, catalog: DatasetCatalog) -> Any:
+    """The real LLM call: build a `ChatOpenAI` client from the environment and invoke it."""
     settings = load_llm_settings()
     model = ChatOpenAI(model=settings.model, api_key=settings.api_key, temperature=0)
-    structured_model = model.with_structured_output(_RunSqlLLMOutput)
+    
+    schema_map = {
+        "run_sql": _RunSqlLLMOutput,
+        "compare_groups": _CompareGroupsLLMOutput,
+        "compute_correlation": _ComputeCorrelationLLMOutput,
+        "train_model": _TrainModelLLMOutput,
+    }
+    structured_model = model.with_structured_output(schema_map[step.tool_family])
     messages = _build_messages(step, catalog)
     return structured_model.invoke(messages)
 

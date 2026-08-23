@@ -4,7 +4,10 @@ import pytest
 
 from adia.agents.argument_generator import (
     _build_messages,
+    _CompareGroupsLLMOutput,
+    _ComputeCorrelationLLMOutput,
     _RunSqlLLMOutput,
+    _TrainModelLLMOutput,
     generate_tool_arguments,
 )
 from adia.models.catalog import ColumnProfile, DatasetCatalog, SemanticType
@@ -192,3 +195,179 @@ class TestLLMFailureHandling:
         # load_llm_settings(), fail on the missing key, and be caught, never raised.
         args = generate_tool_arguments(run_sql_step, catalog, "orders")
         assert args is None
+
+
+# ---------------------------------------------------------------------------
+# Fixtures for the three new tool families
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def compare_groups_step() -> PlanStep:
+    return PlanStep(
+        id="step_cg",
+        intent="Compare price across regions.",
+        tool_family="compare_groups",
+        expected_output="group_stats",
+        success_criteria="ok",
+    )
+
+
+@pytest.fixture
+def compute_correlation_step() -> PlanStep:
+    return PlanStep(
+        id="step_cc",
+        intent="Correlate all numeric columns.",
+        tool_family="compute_correlation",
+        expected_output="correlation_matrix",
+        success_criteria="ok",
+    )
+
+
+@pytest.fixture
+def train_model_step() -> PlanStep:
+    return PlanStep(
+        id="step_tm",
+        intent="Predict price from region.",
+        tool_family="train_model",
+        expected_output="model_report",
+        success_criteria="ok",
+    )
+
+
+# ---------------------------------------------------------------------------
+# compare_groups tests
+# ---------------------------------------------------------------------------
+
+
+class TestCompareGroupsArgumentGeneration:
+    def test_valid_compare_groups_argument_generation(self, catalog, compare_groups_step):
+        output = _CompareGroupsLLMOutput(group_column="region", metric_column="price")
+        args = generate_tool_arguments(
+            compare_groups_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.group_column == "region"
+        assert args.metric_column == "price"
+        assert args.dataset_id == "orders"
+
+    def test_unknown_group_column_rejected(self, catalog, compare_groups_step):
+        output = _CompareGroupsLLMOutput(group_column="nonexistent", metric_column="price")
+        args = generate_tool_arguments(
+            compare_groups_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_unknown_metric_column_rejected(self, catalog, compare_groups_step):
+        output = _CompareGroupsLLMOutput(group_column="region", metric_column="nonexistent")
+        args = generate_tool_arguments(
+            compare_groups_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_llm_failure_degrades_to_none(self, catalog, compare_groups_step):
+        def _raising_call(step, catalog):
+            raise RuntimeError("simulated network failure")
+
+        args = generate_tool_arguments(
+            compare_groups_step, catalog, "orders", llm_call=_raising_call
+        )
+        assert args is None
+
+
+# ---------------------------------------------------------------------------
+# compute_correlation tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeCorrelationArgumentGeneration:
+    def test_valid_explicit_columns(self, catalog, compute_correlation_step):
+        output = _ComputeCorrelationLLMOutput(columns=["price"])
+        args = generate_tool_arguments(
+            compute_correlation_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.columns == ["price"]
+        assert args.dataset_id == "orders"
+
+    def test_null_columns_means_all_numeric(self, catalog, compute_correlation_step):
+        output = _ComputeCorrelationLLMOutput(columns=None)
+        args = generate_tool_arguments(
+            compute_correlation_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.columns is None
+
+    def test_unknown_column_rejected(self, catalog, compute_correlation_step):
+        output = _ComputeCorrelationLLMOutput(columns=["price", "nonexistent"])
+        args = generate_tool_arguments(
+            compute_correlation_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_llm_failure_degrades_to_none(self, catalog, compute_correlation_step):
+        def _raising_call(step, catalog):
+            raise RuntimeError("simulated network failure")
+
+        args = generate_tool_arguments(
+            compute_correlation_step, catalog, "orders", llm_call=_raising_call
+        )
+        assert args is None
+
+
+# ---------------------------------------------------------------------------
+# train_model tests
+# ---------------------------------------------------------------------------
+
+
+class TestTrainModelArgumentGeneration:
+    def test_valid_train_model_argument_generation(self, catalog, train_model_step):
+        output = _TrainModelLLMOutput(
+            target_column="price",
+            feature_columns=["price"],
+            task_type="regression",
+            model_type="linear_regression",
+        )
+        args = generate_tool_arguments(
+            train_model_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.target_column == "price"
+        assert args.feature_columns == ["price"]
+        assert args.task_type == "regression"
+        assert args.model_type == "linear_regression"
+        assert args.dataset_id == "orders"
+
+    def test_unknown_target_column_rejected(self, catalog, train_model_step):
+        output = _TrainModelLLMOutput(
+            target_column="nonexistent",
+            feature_columns=["price"],
+            task_type="regression",
+            model_type="linear_regression",
+        )
+        args = generate_tool_arguments(
+            train_model_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_unknown_feature_column_rejected(self, catalog, train_model_step):
+        output = _TrainModelLLMOutput(
+            target_column="price",
+            feature_columns=["nonexistent"],
+            task_type="regression",
+            model_type="linear_regression",
+        )
+        args = generate_tool_arguments(
+            train_model_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_llm_failure_degrades_to_none(self, catalog, train_model_step):
+        def _raising_call(step, catalog):
+            raise RuntimeError("simulated network failure")
+
+        args = generate_tool_arguments(
+            train_model_step, catalog, "orders", llm_call=_raising_call
+        )
+        assert args is None
+

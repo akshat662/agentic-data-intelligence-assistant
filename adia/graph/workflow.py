@@ -1,13 +1,19 @@
-"""The LangGraph workflow: a strictly linear skeleton, no branching or cycles yet.
+"""The LangGraph workflow: one conditional branch on feasibility, otherwise linear.
 
-    START -> feasibility -> planner -> execute_tools -> synthesizer -> validation -> END
+                          +--> planner -> execute_tools -> synthesizer --+
+                          |                                              |
+    START -> feasibility -+                                              +-> validation -> END
+                          |                                              |
+                          +--> refusal ---------------------------------+
 
-Every node is a deterministic placeholder (`adia/graph/nodes.py`) — no LLM call exists in
-this graph. Conditional routing (an early refusal terminal when infeasible, a tool-repair
-loop, a replan) requires real judgment from a node to route *on*; none of these nodes has
-any yet, so adding branching now would mean routing on nothing. That's Phase 2D's job, once
-an LLM can actually produce a feasibility verdict or a validation failure worth reacting to
-rather than just recording.
+`route_after_feasibility` is the one place this graph reacts to a node's judgment rather than
+just recording it: a `state.feasibility.verdict` other than `FEASIBLE` (infeasible, or needs
+clarification) routes straight to `refusal_node`, skipping `planner_node` and
+`execute_tools_node` entirely — there is nothing to plan or execute for a question already
+ruled out. Both branches rejoin at `validation_node`, which stays the single gate on
+`final_answer` regardless of which path produced `rendered_answer`. No repair loop or replan
+branch exists yet; a validation failure resolves to a fixed fallback answer inside
+`validation_node` itself, not a cycle back into the graph.
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -17,11 +23,29 @@ from adia.graph.nodes import (
     execute_tools_node,
     feasibility_node,
     planner_node,
+    refusal_node,
     synthesizer_node,
     validation_node,
 )
 from adia.graph.state import finalize_state
-from adia.models.state import AgentState
+from adia.models.state import AgentState, FeasibilityVerdict
+
+
+def route_after_feasibility(state: AgentState) -> str:
+    """Decide whether `feasibility_node`'s verdict warrants planning or an outright refusal.
+
+    Args:
+        state: State as returned by `feasibility_node` — `state.feasibility` is expected to
+            be populated; a missing result (shouldn't happen in practice) is treated the same
+            as a non-`FEASIBLE` verdict, since there is nothing to plan against either way.
+
+    Returns:
+        `"planner"` if `state.feasibility.verdict == FeasibilityVerdict.FEASIBLE`, else
+        `"refusal"`.
+    """
+    if state.feasibility is not None and state.feasibility.verdict == FeasibilityVerdict.FEASIBLE:
+        return "planner"
+    return "refusal"
 
 
 def build_graph() -> CompiledStateGraph:
@@ -39,12 +63,18 @@ def build_graph() -> CompiledStateGraph:
     builder.add_node("execute_tools", execute_tools_node)
     builder.add_node("synthesizer", synthesizer_node)
     builder.add_node("validation", validation_node)
+    builder.add_node("refusal", refusal_node)
 
     builder.add_edge(START, "feasibility")
-    builder.add_edge("feasibility", "planner")
+    builder.add_conditional_edges(
+        "feasibility",
+        route_after_feasibility,
+        {"planner": "planner", "refusal": "refusal"},
+    )
     builder.add_edge("planner", "execute_tools")
     builder.add_edge("execute_tools", "synthesizer")
     builder.add_edge("synthesizer", "validation")
+    builder.add_edge("refusal", "validation")
     builder.add_edge("validation", END)
 
     return builder.compile()

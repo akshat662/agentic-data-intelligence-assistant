@@ -1,0 +1,145 @@
+"""The synthesizer agent: turns collected evidence into prose, never into new facts.
+
+`synthesize_answer` asks an LLM to explain a question's collected evidence in plain prose,
+citing every numeric claim with the same `[[evidence_id]]` marker
+`adia.validate.static.validate_answer` already checks for. It never trusts that prose as-is:
+before it is returned, it is run back through `validate_answer` -- the exact same grounding
+check the graph's own `validation_node` applies later -- against the same evidence. Anything
+that fails (an invented number, a dangling or malformed citation, a number with no citation at
+all) is discarded, never handed back. Any failure to reach the LLM at all is treated the same
+way. In every one of those cases, this module falls back to a mechanical, citation-bearing
+answer built directly from the evidence with no LLM involved -- restating a value it already
+has in hand can never itself fail grounding validation, so a caller of `synthesize_answer`
+always gets *some* grounded text back, never `None` and never untrusted prose.
+
+The LLM only ever explains evidence that already exists; it performs no calculation, and every
+number in its output must already appear in the evidence it was shown.
+"""
+
+from collections.abc import Callable, Mapping
+
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, ConfigDict, Field
+
+from adia.agents.llm_config import load_llm_settings
+from adia.evidence.renderer import render_evidence
+from adia.models.evidence import Evidence
+from adia.validate.static import validate_answer
+
+_NO_EVIDENCE_ANSWER = "No evidence was collected; unable to produce a grounded answer."
+
+_SYSTEM_PROMPT = (
+    "You are the synthesis component of a data analysis system. You are given a user's "
+    "question and a rendered summary of evidence already computed by deterministic tools. "
+    "Write a concise, direct answer to the question using ONLY the facts in the evidence "
+    "below.\n\n"
+    "Rules:\n"
+    "- Every numeric claim you make must be a value that appears verbatim in the evidence, "
+    "immediately followed by a citation marker in the form [[evidence_id]] naming the exact "
+    "evidence record that value came from.\n"
+    "- Never perform arithmetic, aggregation, unit conversion, or estimation yourself -- if a "
+    "number is not already present in the evidence exactly as given, do not state it.\n"
+    "- Never introduce facts, numbers, or claims that are not present in the evidence below.\n"
+    "- Only cite evidence IDs that appear in the evidence below; never invent one.\n"
+    "- Write plain prose explaining what the evidence shows, not a raw data dump."
+)
+
+
+class _SynthesizerLLMOutput(BaseModel):
+    """Raw, unverified shape the LLM is asked to produce.
+
+    Never returned to a caller directly -- `synthesize_answer` checks `answer` is non-blank
+    and then re-validates it in full through `validate_answer` before trusting it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    answer: str = Field(
+        default="", description="The synthesized answer, with [[evidence_id]] citations."
+    )
+
+
+#: Signature every `llm_call` -- real or a test's fake -- must satisfy.
+LLMCall = Callable[[str, str], _SynthesizerLLMOutput]
+
+
+def synthesize_answer(
+    question: str,
+    evidence_context: str,
+    evidence: Mapping[str, Evidence],
+    *,
+    llm_call: LLMCall | None = None,
+) -> str:
+    """Synthesize a grounded, citation-bearing answer from already-collected evidence.
+
+    Args:
+        question: The user's question, verbatim.
+        evidence_context: Rendered evidence text (e.g. from
+            `adia.evidence.renderer.render_evidence_context`) shown to the LLM -- the only
+            description of the evidence it sees.
+        evidence: The evidence records themselves, keyed by ID -- used both to validate the
+            LLM's proposed answer and, if that fails, to build the mechanical fallback. Should
+            be the full evidence set for this run, not just what the LLM chose to cite.
+        llm_call: Override for the LLM call, e.g. a fake for tests. Defaults to a real OpenAI
+            call built from `adia.agents.llm_config.load_llm_settings`.
+
+    Returns:
+        A grounded answer string that always passes `validate_answer` against `evidence`: the
+        LLM's own proposal if it passes, or a mechanical, evidence-only fallback otherwise.
+        Never `None` and never raises.
+    """
+    if not evidence:
+        return _NO_EVIDENCE_ANSWER
+
+    resolved_call = llm_call or _call_openai
+    try:
+        raw = resolved_call(question, evidence_context)
+        candidate = raw.answer.strip()
+        if not candidate:
+            raise ValueError("LLM produced no answer text.")
+        result = validate_answer(candidate, evidence)
+        if not result.passed:
+            raise ValueError(f"Synthesized answer failed grounding validation: {result.issues}")
+        return candidate
+    except Exception:  # the LLM is never trusted to be reachable, well-behaved, or grounded
+        return _mechanical_fallback(question, evidence)
+
+
+def _mechanical_fallback(question: str, evidence: Mapping[str, Evidence]) -> str:
+    """Deterministically compose a citation-bearing answer with no LLM involved.
+
+    Used whenever the LLM is unreachable or its proposed answer fails grounding validation.
+    Restates each evidence record's first reported value verbatim, cited by its evidence ID --
+    it states nothing it didn't already have in hand, so it can never itself fail
+    `validate_answer`.
+    """
+    lines = [f"Draft answer for: {question}", ""]
+    for record in sorted(evidence.values(), key=lambda e: e.id):
+        rendered = render_evidence(record)
+        headline = next(iter(rendered.key_values.items()), None)
+        if headline is None:
+            lines.append(f"{rendered.tool} ran but reported no scalar values [[{record.id}]].")
+        else:
+            key, value = headline
+            lines.append(f"{rendered.tool} reports {key} = {value} [[{record.id}]].")
+    return "\n".join(lines)
+
+
+def _call_openai(question: str, evidence_context: str) -> _SynthesizerLLMOutput:
+    """The real LLM call: build a `ChatOpenAI` client from the environment and invoke it.
+
+    Raises whatever `load_llm_settings` or the API call itself raises -- `synthesize_answer`
+    is responsible for catching that, not this function.
+    """
+    settings = load_llm_settings()
+    model = ChatOpenAI(model=settings.model, api_key=settings.api_key, temperature=0)
+    structured_model = model.with_structured_output(_SynthesizerLLMOutput)
+    messages = _build_messages(question, evidence_context)
+    return structured_model.invoke(messages)
+
+
+def _build_messages(question: str, evidence_context: str) -> list[BaseMessage]:
+    """Build the prompt: the fixed system rules plus the question and rendered evidence."""
+    human_content = f"Question: {question}\n\nEvidence:\n{evidence_context}"
+    return [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=human_content)]

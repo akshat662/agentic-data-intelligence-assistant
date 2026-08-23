@@ -20,13 +20,17 @@ from typing import Any
 from adia.agents.argument_generator import generate_tool_arguments
 from adia.agents.feasibility import assess_feasibility
 from adia.agents.planner import create_plan
+from adia.agents.synthesizer import synthesize_answer
 from adia.data.catalog import build_catalog
 from adia.data.loader import load_dataset
 from adia.data.registry import get_dataset_config, load_registry
-from adia.evidence.renderer import render_evidence
+from adia.evidence.renderer import render_evidence_context
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolError, ToolErrorKind
 from adia.models.state import AgentState, FeasibilityResult, FeasibilityVerdict
+from adia.tools.compare_groups import compare_groups
+from adia.tools.correlation import compute_correlation
+from adia.tools.ml_model import train_model
 from adia.tools.profile_dataset import profile_dataset
 from adia.tools.run_sql import run_sql
 from adia.validate.static import validate_answer
@@ -39,10 +43,24 @@ _REGISTRY_PATH = Path(__file__).resolve().parents[2] / "data" / "registry.json"
 #: `tool_family` values `execute_tools_node` currently knows how to run. Every other value in
 #: a plan step produces a typed error rather than being silently skipped — dispatching a tool
 #: with no way to fill in its arguments would mean guessing them, which is exactly the "no
-#: real agent reasoning" line this phase must not cross. `run_sql` arguments come from
-#: `generate_tool_arguments` (LLM proposes, Python validates via `sql_guard`); the other
-#: tool families still have no ArgGen support.
-_SUPPORTED_TOOL_FAMILIES = frozenset({"profile_dataset", "run_sql"})
+#: real agent reasoning" line this phase must not cross. `run_sql`, `compare_groups`, 
+#: `compute_correlation`, and `train_model` arguments come from `generate_tool_arguments` 
+#: (LLM proposes, Python validates); `profile_dataset` runs directly.
+_SUPPORTED_TOOL_FAMILIES = frozenset({
+    "profile_dataset", 
+    "run_sql", 
+    "compare_groups", 
+    "compute_correlation", 
+    "train_model"
+})
+
+#: Returned as `final_answer` when `validation_node` rejects the synthesized answer. A fixed,
+#: known-safe string rather than `None`: the graph always terminates with *something* to show
+#: the user, and this text can never itself carry an ungrounded claim because it states none.
+VALIDATION_FALLBACK_ANSWER = (
+    "The generated answer could not be verified against the collected evidence, so no "
+    "answer is being returned. Please try rephrasing the question."
+)
 
 
 def feasibility_node(state: AgentState) -> dict[str, Any]:
@@ -86,6 +104,36 @@ def feasibility_node(state: AgentState) -> dict[str, Any]:
     return {"catalog": catalog, "feasibility": feasibility}
 
 
+def refusal_node(state: AgentState) -> dict[str, Any]:
+    """Compose a grounded refusal answer for a question that was ruled out at feasibility.
+
+    Reached only via `adia.graph.workflow.route_after_feasibility` when
+    `state.feasibility.verdict` isn't `FEASIBLE` — skips `planner_node` and
+    `execute_tools_node` entirely, since there is nothing to plan or execute for a question
+    already ruled out. States only what `feasibility_node` already determined and verified in
+    Python (`reason`, `missing_columns`, `missing_capabilities`); it invents nothing and cites
+    no evidence, so `validation_node` downstream has nothing ungrounded to catch.
+
+    Sets `refusal` to the triggering `FeasibilityResult`, per that field's own contract
+    ("set when the run terminates via refusal/clarification, not an answer").
+    """
+    if state.feasibility is None:
+        return {}
+
+    parts = [
+        f"This question cannot be answered from the '{state.dataset_id}' dataset: "
+        f"{state.feasibility.reason}"
+    ]
+    if state.feasibility.missing_columns:
+        parts.append(f"Missing column(s): {', '.join(state.feasibility.missing_columns)}.")
+    if state.feasibility.missing_capabilities:
+        parts.append(
+            f"Missing capability(ies): {', '.join(state.feasibility.missing_capabilities)}."
+        )
+    text = " ".join(parts)
+    return {"draft_answer": text, "rendered_answer": text, "refusal": state.feasibility}
+
+
 def planner_node(state: AgentState) -> dict[str, Any]:
     """Ask the planner agent for a plan, already validated against the tool surface.
 
@@ -106,13 +154,12 @@ def planner_node(state: AgentState) -> dict[str, Any]:
 def execute_tools_node(state: AgentState) -> dict[str, Any]:
     """Dispatch each plan step to its tool, deterministically, via the real tool layer.
 
-    `profile_dataset` needs nothing beyond the dataset itself and runs directly. `run_sql`
-    needs a query, which `generate_tool_arguments` (`adia.agents.argument_generator`) proposes
-    via an LLM and then validates in Python — non-blank query, then a full pass through
-    `sql_guard.check_sql` — before anything is trusted; a rejected or unreachable proposal
-    becomes a typed `ToolError` (`kind=VALIDATION`), never a guessed argument. A plan step
-    naming any other `tool_family` (no ArgGen support yet, e.g. `compare_groups`) becomes a
-    typed `ToolError` (`kind=UNKNOWN`) instead.
+    `profile_dataset` needs nothing beyond the dataset itself and runs directly.
+    Other tools need arguments, which `generate_tool_arguments` (`adia.agents.argument_generator`)
+    proposes via an LLM and then validates in Python before anything is trusted. A rejected
+    or unreachable proposal becomes a typed `ToolError` (`kind=VALIDATION`), never a guessed
+    argument. A plan step naming any unsupported `tool_family` becomes a typed `ToolError`
+    (`kind=UNKNOWN`) instead.
 
     Builds a fresh in-memory `EvidenceStore` seeded from `state.evidence` so this node stays
     idempotent across repeated calls, and writes every resulting evidence ID back into state.
@@ -146,7 +193,7 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                 store,
                 plan_step_id=step.id,
             )
-        else:  # run_sql
+        else:
             args = generate_tool_arguments(step, state.catalog, state.catalog.dataset_id)
             if args is None:
                 new_errors.append(
@@ -154,13 +201,43 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                         kind=ToolErrorKind.VALIDATION,
                         message=(
                             "Argument generation failed or was rejected for tool_family "
-                            f"'run_sql' (plan step '{step.id}')."
+                            f"'{step.tool_family}' (plan step '{step.id}')."
                         ),
                         retryable=False,
                     )
                 )
                 continue
-            result = run_sql(args.query, state.catalog, store, plan_step_id=step.id)
+            
+            if step.tool_family == "run_sql":
+                result = run_sql(args.query, state.catalog, store, plan_step_id=step.id)
+            elif step.tool_family == "compare_groups":
+                result = compare_groups(
+                    args.dataset_id, 
+                    args.source_path, 
+                    args.group_column, 
+                    args.metric_column, 
+                    store, 
+                    plan_step_id=step.id
+                )
+            elif step.tool_family == "compute_correlation":
+                result = compute_correlation(
+                    args.dataset_id, 
+                    args.source_path, 
+                    store, 
+                    columns=args.columns, 
+                    plan_step_id=step.id
+                )
+            elif step.tool_family == "train_model":
+                result = train_model(
+                    args.dataset_id,
+                    args.source_path,
+                    args.target_column,
+                    args.feature_columns,
+                    args.task_type,
+                    args.model_type,
+                    store,
+                    plan_step_id=step.id
+                )
 
         if not result.ok:
             new_errors.append(result.error)
@@ -172,47 +249,34 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
 
 
 def synthesizer_node(state: AgentState) -> dict[str, Any]:
-    """Mechanically compose a citation-bearing draft from collected evidence — no prose.
+    """Render collected evidence and ask the synthesizer agent to explain it in prose.
 
-    An LLM Synthesizer will replace this with prose that reasons about what the numbers
-    mean, written as placeholders the deterministic renderer substitutes (per the project's
-    grounding design). This placeholder cannot do that — it has no language model — so it
-    does the only thing that's still honest without one: state each evidence record's first
-    reported value verbatim, cited by evidence ID, and nothing it didn't get from a tool.
+    `synthesize_answer` (`adia.agents.synthesizer`) does the real work: it asks an LLM to
+    write a citation-bearing answer from the rendered evidence context built here via
+    `render_evidence_context`, then re-validates that proposal itself through the same
+    `validate_answer` check `validation_node` applies below, falling back to a mechanical,
+    evidence-only answer if the LLM is unreachable or its proposal doesn't hold up. Either way
+    the result is already grounded by the time it leaves this node.
 
-    Sets `rendered_answer` directly to the same text as `draft_answer`, since there are no
-    `{{ev.field}}` placeholders here to substitute — this placeholder never writes a value it
-    didn't already have in hand.
+    Sets `rendered_answer` directly to the same text as `draft_answer` — the synthesizer
+    writes real values inline (cited, not templated), so there is no separate placeholder
+    substitution step left to perform here.
     """
-    if not state.evidence:
-        text = "No evidence was collected; unable to produce a grounded answer."
-        return {"draft_answer": text, "rendered_answer": text}
-
-    lines = [f"Draft answer for: {state.question}", ""]
-    for evidence in sorted(state.evidence.values(), key=lambda e: e.id):
-        rendered = render_evidence(evidence)
-        headline = next(iter(rendered.key_values.items()), None)
-        if headline is None:
-            lines.append(f"{rendered.tool} ran but reported no scalar values [[{evidence.id}]].")
-        else:
-            key, value = headline
-            lines.append(f"{rendered.tool} reports {key} = {value} [[{evidence.id}]].")
-
-    text = "\n".join(lines)
-    return {"draft_answer": text, "rendered_answer": text}
+    context = render_evidence_context(list(state.evidence.values()))
+    answer = synthesize_answer(state.question, context, state.evidence)
+    return {"draft_answer": answer, "rendered_answer": answer}
 
 
 def validation_node(state: AgentState) -> dict[str, Any]:
     """Run the static grounding validator and gate `final_answer` on the result.
 
     Reuses `adia.validate.static.validate_answer` unchanged — this node is only the graph
-    wiring around it. `final_answer` is only ever set to a passing, grounded answer;
-    validation failure leaves it `None` rather than surfacing unverified text. A future
-    Critic node handles semantic overreach this validator doesn't check; that node does not
-    exist yet, so nothing here claims to catch it.
+    wiring around it. `final_answer` is only ever set to a passing, grounded answer, or to the
+    fixed `VALIDATION_FALLBACK_ANSWER` on failure — never to unverified text, and never
+    `None`, so the graph always ends with a deterministic response to show the user rather
+    than a repair loop. A future Critic node handles semantic overreach this validator doesn't
+    check; that node does not exist yet, so nothing here claims to catch it.
     """
     result = validate_answer(state.rendered_answer or "", state.evidence)
-    return {
-        "validation": result,
-        "final_answer": state.rendered_answer if result.passed else None,
-    }
+    final_answer = state.rendered_answer if result.passed else VALIDATION_FALLBACK_ANSWER
+    return {"validation": result, "final_answer": final_answer}
