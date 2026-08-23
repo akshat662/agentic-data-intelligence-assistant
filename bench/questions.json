@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "note": "Template questions only. 'template_dataset' is not a registered dataset — these entries exist to fix the schema and illustrate each category before any real dataset or benchmark run exists. See bench/README.md.",
+  "questions": [
+    {
+      "id": "q001",
+      "dataset_id": "template_dataset",
+      "category": "descriptive",
+      "question": "How many rows does the dataset have, and what do the columns look like?",
+      "answerable": true,
+      "gold_tools": ["profile_dataset"],
+      "notes": "Descriptive questions should resolve from profiling alone, no SQL needed."
+    },
+    {
+      "id": "q002",
+      "dataset_id": "template_dataset",
+      "category": "sql_aggregation",
+      "question": "What is the total metric value grouped by category for the last quarter?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": null
+    },
+    {
+      "id": "q003",
+      "dataset_id": "template_dataset",
+      "category": "statistical_comparison",
+      "question": "Is there a meaningful difference in the metric between group A and group B?",
+      "answerable": true,
+      "gold_tools": ["compare_groups"],
+      "notes": null
+    },
+    {
+      "id": "q004",
+      "dataset_id": "template_dataset",
+      "category": "root_cause",
+      "question": "Why did the headline metric drop between period 1 and period 2?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "The centerpiece question class this benchmark leads with; a real segment-contribution decomposition tool is future scope."
+    },
+    {
+      "id": "q005",
+      "dataset_id": "template_dataset",
+      "category": "predictive",
+      "question": "Can we predict the target column from the available features, and how well?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "A predictive answer must always be reported alongside its baseline, per train_model's own contract."
+    },
+    {
+      "id": "q006",
+      "dataset_id": "template_dataset",
+      "category": "unanswerable",
+      "question": "Will the metric grow next year?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No leading indicators or forecasting capability exist; the system should refuse rather than guess."
+    }
+  ]
+}

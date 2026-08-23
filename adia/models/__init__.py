@@ -7,6 +7,7 @@ imports from them.
 """
 
 from adia.models.catalog import ColumnProfile, DatasetCatalog, SemanticType
+from adia.models.dataset import DatasetConfig
 from adia.models.errors import ToolError, ToolErrorKind
 from adia.models.evidence import Evidence
 from adia.models.plan import PlanStep
@@ -31,6 +32,7 @@ __all__ = [
     "Critique",
     "CritiqueSeverity",
     "DatasetCatalog",
+    "DatasetConfig",
     "Evidence",
     "FeasibilityResult",
     "FeasibilityVerdict",

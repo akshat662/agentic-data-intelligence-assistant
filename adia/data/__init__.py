@@ -7,11 +7,15 @@ build on.
 
 from adia.data.catalog import build_catalog, load_catalog, profile_column, save_catalog
 from adia.data.loader import load_dataset
+from adia.data.registry import get_dataset_config, load_registry, save_registry
 
 __all__ = [
     "build_catalog",
+    "get_dataset_config",
     "load_catalog",
     "load_dataset",
+    "load_registry",
     "profile_column",
     "save_catalog",
+    "save_registry",
 ]
