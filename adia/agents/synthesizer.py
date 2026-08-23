@@ -16,6 +16,7 @@ The LLM only ever explains evidence that already exists; it performs no calculat
 number in its output must already appear in the evidence it was shown.
 """
 
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -33,6 +34,11 @@ _NO_EVIDENCE_ANSWER = "No evidence was collected; unable to produce a grounded a
 #: Cap on how many key-values `_mechanical_fallback` reports per evidence record -- enough to
 #: be informative without turning the fallback into a raw data dump.
 _MAX_FALLBACK_VALUES_PER_RECORD = 3
+
+#: Matches a list-index segment in a renderer-flattened dotted-path key, e.g. the `[0]` in
+#: `rows[0].total_sales`. Used only to sanitize what `_mechanical_fallback` *displays* --
+#: never touches the key used to look up a value, or the value itself.
+_INDEX_SEGMENT_PATTERN = re.compile(r"\[\d+\]")
 
 _SYSTEM_PROMPT = (
     "You are the synthesis component of a data analysis system. You are given a user's "
@@ -117,7 +123,10 @@ def _mechanical_fallback(question: str, evidence: Mapping[str, Evidence]) -> str
     Used whenever the LLM is unreachable or its proposed answer fails grounding validation.
     Restates each evidence record's most meaningful reported values verbatim (see
     `_select_fallback_values`), cited by its evidence ID -- it states nothing it didn't
-    already have in hand, so it can never itself fail `validate_answer`.
+    already have in hand, so it can never itself fail `validate_answer`. Displayed labels are
+    sanitized (`_sanitize_label`) so a list index embedded in a flattened key name (e.g. the
+    `0` in `rows[0].total_sales`) can't be misread as an unsupported claimed number; the
+    numeric value printed after `=` is always the real, untouched evidence value.
     """
     lines = [f"Draft answer for: {question}", ""]
     for record in sorted(evidence.values(), key=lambda e: e.id):
@@ -126,9 +135,34 @@ def _mechanical_fallback(question: str, evidence: Mapping[str, Evidence]) -> str
         if not selected:
             lines.append(f"{rendered.tool} ran but reported no scalar values [[{record.id}]].")
         else:
-            pairs = ", ".join(f"{key} = {value}" for key, value in selected)
+            pairs = ", ".join(f"{_sanitize_label(key)} = {value}" for key, value in selected)
             lines.append(f"{rendered.tool} reports {pairs} [[{record.id}]].")
     return "\n".join(lines)
+
+
+def _sanitize_label(key: str) -> str:
+    """Strip list-index brackets from a dotted-path key, for display only.
+
+    The renderer's flattened keys (`adia.evidence.renderer._walk_summary`) embed a list's
+    numeric index directly in the key name, e.g. `rows[0].total_sales` or, for nested lists,
+    `feature_importance[0].importance`. Printing that key verbatim puts a bare digit between
+    non-word characters (`[`/`]`), which `validate_answer`'s regex-based number extractor
+    reads as a standalone claimed numeric value -- a false positive, since an array index was
+    never a claim about the data. Stripping every `[<digits>]` segment leaves a genuinely
+    readable label (`rows.total_sales`) without changing which value it names or the value
+    itself; the key used to look up `value` in `_select_fallback_values` is never touched.
+
+    Args:
+        key: A dotted-path key as produced by the renderer, e.g. `rows[0].total_sales`.
+
+    Returns:
+        The key with every `[<digits>]` segment removed and stray leading/trailing/duplicate
+        dots cleaned up. Falls back to `"value"` if stripping leaves nothing (a bare top-level
+        list index, e.g. `[0]`, has no other text to display).
+    """
+    stripped = _INDEX_SEGMENT_PATTERN.sub("", key)
+    stripped = re.sub(r"\.{2,}", ".", stripped).strip(".")
+    return stripped or "value"
 
 
 def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]:
