@@ -22,7 +22,7 @@ from adia.models.errors import ToolErrorKind
 from adia.models.evidence import Evidence
 from adia.models.plan import PlanStep
 from adia.models.provenance import Provenance
-from adia.models.state import FeasibilityVerdict
+from adia.models.state import FeasibilityResult, FeasibilityVerdict
 
 
 @pytest.fixture
@@ -31,25 +31,60 @@ def superstore_catalog():
     return build_catalog(df, dataset_id="superstore", source_path="data/superstore.csv")
 
 
+def _mock_feasibility(verdict: FeasibilityVerdict, **kwargs):
+    """A stand-in for `adia.agents.feasibility.assess_feasibility` — no LLM call, no API key."""
+
+    def _assess(question, catalog):
+        return FeasibilityResult(verdict=verdict, reason="mocked for test", **kwargs)
+
+    return _assess
+
+
 class TestFeasibilityNode:
-    def test_registered_dataset_is_feasible(self):
+    def test_registered_dataset_calls_feasibility_agent(self, monkeypatch):
+        monkeypatch.setattr(
+            "adia.graph.nodes.assess_feasibility",
+            _mock_feasibility(FeasibilityVerdict.FEASIBLE),
+        )
         state = create_initial_state("How many rows?", "superstore")
         update = feasibility_node(state)
         assert update["feasibility"].verdict == FeasibilityVerdict.FEASIBLE
         assert update["catalog"] is not None
         assert update["catalog"].dataset_id == "superstore"
 
-    def test_unregistered_dataset_is_infeasible(self):
+    def test_agent_infeasible_verdict_is_passed_through(self, monkeypatch):
+        monkeypatch.setattr(
+            "adia.graph.nodes.assess_feasibility",
+            _mock_feasibility(FeasibilityVerdict.INFEASIBLE, missing_columns=["Employee Name"]),
+        )
+        state = create_initial_state("Sales by employee?", "superstore")
+        update = feasibility_node(state)
+        assert update["feasibility"].verdict == FeasibilityVerdict.INFEASIBLE
+        assert update["feasibility"].missing_columns == ["Employee Name"]
+        # The dataset itself still loaded fine -- catalog is populated regardless of verdict.
+        assert update["catalog"] is not None
+
+    def test_unregistered_dataset_is_infeasible_without_calling_agent(self, monkeypatch):
+        def _fail_if_called(question, catalog):
+            raise AssertionError("assess_feasibility should not be called: dataset unregistered")
+
+        monkeypatch.setattr("adia.graph.nodes.assess_feasibility", _fail_if_called)
         state = create_initial_state("How many rows?", "nonexistent_dataset")
         update = feasibility_node(state)
         assert update["feasibility"].verdict == FeasibilityVerdict.INFEASIBLE
         assert "catalog" not in update
 
-    def test_registered_but_unloadable_dataset_is_infeasible(self, monkeypatch):
+    def test_registered_but_unloadable_dataset_is_infeasible_without_calling_agent(
+        self, monkeypatch
+    ):
         def _broken_loader(_path):
             raise FileNotFoundError("simulated missing file")
 
+        def _fail_if_called(question, catalog):
+            raise AssertionError("assess_feasibility should not be called: dataset unloadable")
+
         monkeypatch.setattr("adia.graph.nodes.load_dataset", _broken_loader)
+        monkeypatch.setattr("adia.graph.nodes.assess_feasibility", _fail_if_called)
         state = create_initial_state("How many rows?", "superstore")
         update = feasibility_node(state)
         assert update["feasibility"].verdict == FeasibilityVerdict.INFEASIBLE

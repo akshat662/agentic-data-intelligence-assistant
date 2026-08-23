@@ -1,18 +1,22 @@
-"""Deterministic placeholder node functions for the ADIA workflow graph.
+"""Node functions for the ADIA workflow graph.
 
-Every node here does real, deterministic work using the existing Phase 1/2 infrastructure
-(dataset registry, tools, evidence store, renderer, static validator) — none of it is a
-no-op stub. What's missing is *judgment*: choosing a plan, deciding what a number means,
-writing prose. Each node's docstring says exactly what an LLM will replace it with, and
-why the current version is a defensible placeholder rather than a fake one.
+`feasibility_node` calls a real LLM agent (`adia.agents.feasibility.assess_feasibility`);
+every other node here remains a deterministic placeholder doing real work with the existing
+Phase 1/2 infrastructure (dataset registry, tools, evidence store, renderer, static
+validator) — none of it is a no-op stub. What's still missing from those is *judgment*:
+choosing a plan, deciding what a number means, writing prose. Each node's docstring says
+exactly what an LLM will replace it with next, and why the current version is a defensible
+placeholder rather than a fake one.
 
-No node here raises: every external call is wrapped so a failure becomes a state update
-(an error, an infeasible verdict), never an exception the graph has to handle.
+No node here raises: every external call — LLM or otherwise — is wrapped so a failure
+becomes a state update (an error, an infeasible verdict), never an exception the graph has
+to handle.
 """
 
 from pathlib import Path
 from typing import Any
 
+from adia.agents.feasibility import assess_feasibility
 from adia.data.catalog import build_catalog
 from adia.data.loader import load_dataset
 from adia.data.registry import get_dataset_config, load_registry
@@ -38,14 +42,16 @@ _SUPPORTED_TOOL_FAMILY = "profile_dataset"
 
 
 def feasibility_node(state: AgentState) -> dict[str, Any]:
-    """Deterministically verify the dataset exists and loads; no reasoning about the question.
+    """Verify the dataset loads, then ask the feasibility agent whether the question fits it.
 
-    This is the one slice of feasibility checking that never needs an LLM: is `dataset_id`
-    registered, and does its file actually load. The full feasibility check described in the
-    project's design — cross-referencing the question's implied columns against the catalog
-    — needs an LLM to propose which columns the question is even about, and will replace
-    this node's `FEASIBLE`/`INFEASIBLE` reasoning (not its registry/load check, which stays)
-    once that exists.
+    The registry lookup and dataset load are deterministic Python, unchanged from before —
+    if the dataset itself doesn't exist or won't load, there is nothing for an LLM to
+    usefully reason about, so this short-circuits to `INFEASIBLE` before any LLM call.
+    Once a catalog is available, `assess_feasibility` (`adia.agents.feasibility`) makes the
+    real verdict: it asks an LLM which columns the question needs and whether it's
+    answerable, then cross-checks every column the LLM named against this exact catalog in
+    Python before trusting any of it — a hallucinated column forces `INFEASIBLE` regardless
+    of what the LLM claimed.
 
     Populates `catalog` on success, so every later node can read dataset shape without
     touching the registry or filesystem again.
@@ -72,17 +78,8 @@ def feasibility_node(state: AgentState) -> dict[str, Any]:
         }
 
     catalog = build_catalog(df, dataset_id=state.dataset_id, source_path=config.file_path)
-    return {
-        "catalog": catalog,
-        "feasibility": FeasibilityResult(
-            verdict=FeasibilityVerdict.FEASIBLE,
-            reason=(
-                "Dataset is registered and loaded successfully. This placeholder check does "
-                "not yet verify that the question's implied columns exist in the catalog — "
-                "that requires an LLM to identify which columns the question is about."
-            ),
-        ),
-    }
+    feasibility = assess_feasibility(state.question, catalog)
+    return {"catalog": catalog, "feasibility": feasibility}
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:

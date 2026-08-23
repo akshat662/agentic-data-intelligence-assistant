@@ -1,0 +1,17 @@
+"""LLM agents: reasoning only. Every claim an agent makes is verified in Python before it
+reaches `AgentState` — no agent output is trusted blindly.
+
+Tool execution, evidence handling, and validation live outside this package (`adia.tools`,
+`adia.evidence`, `adia.validate`) and stay untouched by anything here.
+"""
+
+from adia.agents.feasibility import assess_feasibility
+from adia.agents.llm_config import DEFAULT_MODEL, LLMSettings, MissingApiKeyError, load_llm_settings
+
+__all__ = [
+    "DEFAULT_MODEL",
+    "LLMSettings",
+    "MissingApiKeyError",
+    "assess_feasibility",
+    "load_llm_settings",
+]
