@@ -2,11 +2,18 @@
 
 import pytest
 
-from adia.agents.synthesizer import _build_messages, _SynthesizerLLMOutput, synthesize_answer
+from adia.agents.synthesizer import (
+    _build_messages,
+    _mechanical_fallback,
+    _select_fallback_values,
+    _SynthesizerLLMOutput,
+    synthesize_answer,
+)
 from adia.evidence.ids import compute_args_hash, generate_evidence_id
-from adia.evidence.renderer import render_evidence_context
+from adia.evidence.renderer import render_evidence, render_evidence_context
 from adia.models.evidence import Evidence
 from adia.models.provenance import Provenance
+from adia.validate.static import validate_answer
 
 
 def _make_evidence(tool: str, args: dict, data: object) -> Evidence:
@@ -148,6 +155,121 @@ class TestMechanicalFallback:
         )
         assert "reported no scalar values" in answer
         assert f"[[{empty_evidence.id}]]" in answer
+
+
+class TestMechanicalFallbackValueSelection:
+    """Covers the headline-selection fix: bookkeeping/config fields no longer win by default."""
+
+    def test_run_sql_fallback_prefers_row_values_over_rows_count(self):
+        # rows_count is deprioritized, not excluded -- with a real row value available, it
+        # must no longer be the *headline* (top-ranked) choice, though it may still fill a
+        # remaining slot in the top-3 if nothing better is left.
+        run_sql_evidence = _make_evidence(
+            "run_sql",
+            {"query": "select * from orders order by sales desc limit 10"},
+            {
+                "rows": [{"Product Name": "Widget", "Sales": 5000.0}],
+                "row_count": 10,
+            },
+        )
+        selected = _select_fallback_values(render_evidence(run_sql_evidence).key_values)
+        assert selected[0] == ("rows[0].Sales", 5000.0)
+        answer = _mechanical_fallback(
+            "Top products by sales?", {run_sql_evidence.id: run_sql_evidence}
+        )
+        assert "rows[0].Sales = 5000.0" in answer
+
+    def test_train_model_fallback_prefers_metric_value_over_model_type(self):
+        # Same principle: model_type is deprioritized (non-numeric), not banned outright.
+        # With real metric values present, they must rank ahead of it as the headline.
+        train_model_evidence = _make_evidence(
+            "train_model",
+            {"target_column": "Region"},
+            {
+                "model_type": "random_forest_classifier",
+                "task_type": "classification",
+                "metric_name": "accuracy",
+                "metric_value": 0.83,
+                "baseline_metric_name": "accuracy",
+                "baseline_metric_value": 0.5,
+            },
+        )
+        selected = _select_fallback_values(render_evidence(train_model_evidence).key_values)
+        assert selected[0] == ("metric_value", 0.83)
+        assert selected[1] == ("baseline_metric_value", 0.5)
+        answer = _mechanical_fallback(
+            "How well can Region be predicted?", {train_model_evidence.id: train_model_evidence}
+        )
+        assert "metric_value = 0.83" in answer
+
+    def test_select_fallback_values_ranks_numeric_non_count_first(self):
+        key_values = {
+            "rows_count": 10,
+            "model_type": "random_forest_classifier",
+            "metric_value": 0.83,
+        }
+        selected = _select_fallback_values(key_values)
+        assert selected[0] == ("metric_value", 0.83)
+
+    def test_select_fallback_values_falls_back_to_count_when_nothing_else_exists(self):
+        # A count key is still better than nothing: it's not excluded, only deprioritized.
+        key_values = {"rows_count": 10}
+        selected = _select_fallback_values(key_values)
+        assert selected == [("rows_count", 10)]
+
+    def test_select_fallback_values_caps_at_three(self):
+        key_values = {f"metric_{i}": float(i) for i in range(6)}
+        selected = _select_fallback_values(key_values)
+        assert len(selected) == 3
+
+    def test_fallback_with_multiple_selected_values_passes_validate_answer(self):
+        train_model_evidence = _make_evidence(
+            "train_model",
+            {"target_column": "Region"},
+            {
+                "model_type": "random_forest_classifier",
+                "metric_name": "accuracy",
+                "metric_value": 0.83,
+                "baseline_metric_value": 0.5,
+            },
+        )
+        answer = _mechanical_fallback(
+            "How well can Region be predicted?", {train_model_evidence.id: train_model_evidence}
+        )
+        result = validate_answer(answer, {train_model_evidence.id: train_model_evidence})
+        assert result.passed is True
+        assert result.issues == []
+
+    def test_fallback_output_is_deterministic_across_repeated_calls(self):
+        train_model_evidence = _make_evidence(
+            "train_model",
+            {"target_column": "Region"},
+            {
+                "model_type": "random_forest_classifier",
+                "task_type": "classification",
+                "metric_name": "accuracy",
+                "metric_value": 0.83,
+                "baseline_metric_value": 0.5,
+            },
+        )
+        evidence_map = {train_model_evidence.id: train_model_evidence}
+        first = _mechanical_fallback("How well can Region be predicted?", evidence_map)
+        second = _mechanical_fallback("How well can Region be predicted?", evidence_map)
+        third = _mechanical_fallback("How well can Region be predicted?", evidence_map)
+        assert first == second == third
+
+    def test_selection_is_derived_only_from_rendered_evidence_values(self):
+        # No architecture change: selection still reads exclusively from render_evidence's
+        # own key_values -- nothing new is invented, and citations are untouched.
+        train_model_evidence = _make_evidence(
+            "train_model",
+            {"target_column": "Region"},
+            {"model_type": "random_forest_classifier", "metric_value": 0.83},
+        )
+        rendered = render_evidence(train_model_evidence)
+        selected = _select_fallback_values(rendered.key_values)
+        for key, value in selected:
+            assert rendered.key_values[key] == value
 
 
 class TestBuildMessages:

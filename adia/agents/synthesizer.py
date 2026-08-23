@@ -17,6 +17,7 @@ number in its output must already appear in the evidence it was shown.
 """
 
 from collections.abc import Callable, Mapping
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -28,6 +29,10 @@ from adia.models.evidence import Evidence
 from adia.validate.static import validate_answer
 
 _NO_EVIDENCE_ANSWER = "No evidence was collected; unable to produce a grounded answer."
+
+#: Cap on how many key-values `_mechanical_fallback` reports per evidence record -- enough to
+#: be informative without turning the fallback into a raw data dump.
+_MAX_FALLBACK_VALUES_PER_RECORD = 3
 
 _SYSTEM_PROMPT = (
     "You are the synthesis component of a data analysis system. You are given a user's "
@@ -110,20 +115,61 @@ def _mechanical_fallback(question: str, evidence: Mapping[str, Evidence]) -> str
     """Deterministically compose a citation-bearing answer with no LLM involved.
 
     Used whenever the LLM is unreachable or its proposed answer fails grounding validation.
-    Restates each evidence record's first reported value verbatim, cited by its evidence ID --
-    it states nothing it didn't already have in hand, so it can never itself fail
-    `validate_answer`.
+    Restates each evidence record's most meaningful reported values verbatim (see
+    `_select_fallback_values`), cited by its evidence ID -- it states nothing it didn't
+    already have in hand, so it can never itself fail `validate_answer`.
     """
     lines = [f"Draft answer for: {question}", ""]
     for record in sorted(evidence.values(), key=lambda e: e.id):
         rendered = render_evidence(record)
-        headline = next(iter(rendered.key_values.items()), None)
-        if headline is None:
+        selected = _select_fallback_values(rendered.key_values)
+        if not selected:
             lines.append(f"{rendered.tool} ran but reported no scalar values [[{record.id}]].")
         else:
-            key, value = headline
-            lines.append(f"{rendered.tool} reports {key} = {value} [[{record.id}]].")
+            pairs = ", ".join(f"{key} = {value}" for key, value in selected)
+            lines.append(f"{rendered.tool} reports {pairs} [[{record.id}]].")
     return "\n".join(lines)
+
+
+def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]:
+    """Rank a rendered evidence record's key-values and return the most meaningful few.
+
+    "First key in the dict" is a poor proxy for "most meaningful value": a tool's result dict
+    may put a bookkeeping field (e.g. the renderer's own synthesized `rows_count`) or a
+    configuration/identifier field (e.g. `model_type`) ahead of the actual analytical result
+    (an aggregated figure, a correlation coefficient, a model's metric value) simply because
+    of insertion order. Two independent, tool-agnostic signals correct for that, combined
+    additively so neither strictly overrides the other:
+
+    - `count_penalty`: 1 if the key name contains "count" -- catches both the renderer's own
+      synthesized list-length keys and count-flavored tool fields, deprioritized (not
+      excluded) since a count is still informative when nothing else is available.
+    - `type_penalty`: 1 if the value isn't numeric -- a question is almost always asking for a
+      number (a total, a rate, a score), while configuration/identifier fields (model type,
+      dataset ID, column names) are almost always strings or lists.
+
+    Keys are otherwise kept in their original (insertion) order, so this is a stable
+    re-ranking, not a re-sort by value -- and, for a fixed evidence record, always produces
+    the same output.
+
+    Args:
+        key_values: A `RenderedEvidence.key_values` mapping, already bounded and flattened by
+            `adia.evidence.renderer`.
+
+    Returns:
+        Up to `_MAX_FALLBACK_VALUES_PER_RECORD` `(key, value)` pairs, best first. Empty if
+        `key_values` is empty.
+    """
+
+    def _penalty(indexed_item: tuple[int, tuple[str, Any]]) -> tuple[int, int]:
+        index, (key, value) = indexed_item
+        count_penalty = 1 if "count" in key.lower() else 0
+        is_numeric = isinstance(value, int | float) and not isinstance(value, bool)
+        type_penalty = 0 if is_numeric else 1
+        return (count_penalty + type_penalty, index)
+
+    ranked = sorted(enumerate(key_values.items()), key=_penalty)
+    return [pair for _, pair in ranked[:_MAX_FALLBACK_VALUES_PER_RECORD]]
 
 
 def _call_openai(question: str, evidence_context: str) -> _SynthesizerLLMOutput:
