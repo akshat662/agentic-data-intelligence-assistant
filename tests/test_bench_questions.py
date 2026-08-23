@@ -93,6 +93,30 @@ class TestShippedQuestionsFile:
         categories = {q.category for q in questions}
         assert categories == set(QuestionCategory)
 
-    def test_shipped_file_uses_placeholder_dataset_only(self):
+    def test_shipped_file_references_registered_dataset_only(self):
         questions = load_questions(_SHIPPED_QUESTIONS_PATH)
-        assert {q.dataset_id for q in questions} == {"template_dataset"}
+        assert {q.dataset_id for q in questions} == {"superstore"}
+
+    def test_shipped_questions_dataset_is_registered(self):
+        from adia.data.registry import load_registry
+
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        registry = load_registry(_SHIPPED_QUESTIONS_PATH.parent.parent / "data" / "registry.json")
+        for question in questions:
+            assert question.dataset_id in registry
+
+    def test_shipped_file_has_expected_category_counts(self):
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        counts: dict[str, int] = {}
+        for question in questions:
+            counts[question.category] = counts.get(question.category, 0) + 1
+        assert counts[QuestionCategory.SQL_AGGREGATION] == 5
+        assert counts[QuestionCategory.STATISTICAL_COMPARISON] == 5
+        assert counts[QuestionCategory.PREDICTIVE] == 5
+        assert counts[QuestionCategory.UNANSWERABLE] == 5
+
+    def test_shipped_file_unanswerable_questions_cite_no_gold_tools(self):
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        for question in questions:
+            if question.category == QuestionCategory.UNANSWERABLE:
+                assert question.gold_tools == []

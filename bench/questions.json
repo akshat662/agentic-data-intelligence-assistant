@@ -1,60 +1,204 @@
 {
   "schema_version": 1,
-  "note": "Template questions only. 'template_dataset' is not a registered dataset — these entries exist to fix the schema and illustrate each category before any real dataset or benchmark run exists. See bench/README.md.",
+  "note": "Real questions against the registered 'superstore' dataset (data/superstore.csv, data/registry.json). No gold/oracle values yet -- that requires independently-written oracle scripts and the agent/graph layer, both future scope. See bench/README.md.",
   "questions": [
     {
       "id": "q001",
-      "dataset_id": "template_dataset",
+      "dataset_id": "superstore",
       "category": "descriptive",
-      "question": "How many rows does the dataset have, and what do the columns look like?",
+      "question": "What is the date range covered by this dataset, and how many distinct customers, products, and orders does it contain?",
       "answerable": true,
       "gold_tools": ["profile_dataset"],
-      "notes": "Descriptive questions should resolve from profiling alone, no SQL needed."
+      "notes": null
     },
     {
       "id": "q002",
-      "dataset_id": "template_dataset",
+      "dataset_id": "superstore",
       "category": "sql_aggregation",
-      "question": "What is the total metric value grouped by category for the last quarter?",
+      "question": "What is the total Sales revenue for each product Category?",
       "answerable": true,
       "gold_tools": ["run_sql"],
       "notes": null
     },
     {
       "id": "q003",
-      "dataset_id": "template_dataset",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "What is the total Profit for each Region?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": null
+    },
+    {
+      "id": "q004",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "Which 10 products have the highest total Sales?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": null
+    },
+    {
+      "id": "q005",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "How many orders were placed under each Ship Mode?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": null
+    },
+    {
+      "id": "q006",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "What is the total Sales and total Profit for each customer Segment?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": null
+    },
+    {
+      "id": "q007",
+      "dataset_id": "superstore",
       "category": "statistical_comparison",
-      "question": "Is there a meaningful difference in the metric between group A and group B?",
+      "question": "Is there a significant difference in average Profit between the Consumer and Corporate segments?",
       "answerable": true,
       "gold_tools": ["compare_groups"],
       "notes": null
     },
     {
-      "id": "q004",
-      "dataset_id": "template_dataset",
-      "category": "root_cause",
-      "question": "Why did the headline metric drop between period 1 and period 2?",
+      "id": "q008",
+      "dataset_id": "superstore",
+      "category": "statistical_comparison",
+      "question": "Is there a meaningful difference in average Sales across the four Regions?",
       "answerable": true,
-      "gold_tools": ["run_sql", "compare_groups"],
-      "notes": "The centerpiece question class this benchmark leads with; a real segment-contribution decomposition tool is future scope."
+      "gold_tools": ["compare_groups"],
+      "notes": null
     },
     {
-      "id": "q005",
-      "dataset_id": "template_dataset",
+      "id": "q009",
+      "dataset_id": "superstore",
+      "category": "statistical_comparison",
+      "question": "How strongly are Sales and Profit correlated?",
+      "answerable": true,
+      "gold_tools": ["compute_correlation"],
+      "notes": "Correlation only -- causal_claim_allowed is False on this tool's evidence by design."
+    },
+    {
+      "id": "q010",
+      "dataset_id": "superstore",
+      "category": "statistical_comparison",
+      "question": "How strongly are Discount and Profit correlated?",
+      "answerable": true,
+      "gold_tools": ["compute_correlation"],
+      "notes": "Correlation only -- causal_claim_allowed is False on this tool's evidence by design."
+    },
+    {
+      "id": "q011",
+      "dataset_id": "superstore",
+      "category": "statistical_comparison",
+      "question": "Is there a meaningful difference in average Discount between the Furniture and Technology categories?",
+      "answerable": true,
+      "gold_tools": ["compare_groups"],
+      "notes": null
+    },
+    {
+      "id": "q012",
+      "dataset_id": "superstore",
       "category": "predictive",
-      "question": "Can we predict the target column from the available features, and how well?",
+      "question": "How well can Profit be predicted from Sales, Quantity, and Discount?",
       "answerable": true,
       "gold_tools": ["train_model"],
-      "notes": "A predictive answer must always be reported alongside its baseline, per train_model's own contract."
+      "notes": "Regression; target_column=Profit. Must be reported against the mean-predictor baseline, per train_model's own contract."
     },
     {
-      "id": "q006",
-      "dataset_id": "template_dataset",
+      "id": "q013",
+      "dataset_id": "superstore",
+      "category": "predictive",
+      "question": "How well can Sales be predicted from Quantity and Discount?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "Regression; target_column=Sales."
+    },
+    {
+      "id": "q014",
+      "dataset_id": "superstore",
+      "category": "predictive",
+      "question": "How well can the Region an order shipped to be predicted from its Sales, Profit, Quantity, and Discount?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "Multiclass classification (4 classes); target_column=Region."
+    },
+    {
+      "id": "q015",
+      "dataset_id": "superstore",
+      "category": "predictive",
+      "question": "How well can the Ship Mode of an order be predicted from its Sales, Quantity, Discount, and Profit?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "Multiclass classification (4 classes); target_column=Ship Mode."
+    },
+    {
+      "id": "q016",
+      "dataset_id": "superstore",
+      "category": "predictive",
+      "question": "How well can a customer's Segment be predicted from their orders' Sales, Profit, Quantity, and Discount?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "Multiclass classification (3 classes); target_column=Segment."
+    },
+    {
+      "id": "q017",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why is total Profit lower in the Central region than in the West region?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "No dedicated segment-contribution/decomposition tool exists yet; answerable today only as an aggregation-plus-comparison, not a full volume-vs-rate decomposition."
+    },
+    {
+      "id": "q018",
+      "dataset_id": "superstore",
       "category": "unanswerable",
-      "question": "Will the metric grow next year?",
+      "question": "Will next quarter's total revenue increase compared to this quarter?",
       "answerable": false,
       "gold_tools": [],
-      "notes": "No leading indicators or forecasting capability exist; the system should refuse rather than guess."
+      "notes": "No forecasting capability and no future data exist; the system should decline rather than extrapolate."
+    },
+    {
+      "id": "q019",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "What is the email address of the customer who placed order CA-2017-152156?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No customer contact-information column exists in this dataset -- only Customer ID and Customer Name."
+    },
+    {
+      "id": "q020",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "Why did customers return their orders, and which orders were returned?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "The original workbook's Returns sheet was deliberately excluded when this dataset was cleaned for registration; no return/reason column is present in data/superstore.csv."
+    },
+    {
+      "id": "q021",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "Which sales representative or employee processed each order?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No employee/sales-rep column exists in this dataset."
+    },
+    {
+      "id": "q022",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "Which competitor's pricing caused us to increase discounts in the Technology category?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "Requires external competitor data that is not present in, or inferable from, this dataset."
     }
   ]
 }

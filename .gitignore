@@ -34,8 +34,14 @@ htmlcov/
 !.env.example
 
 # --- Data (keep folder, ignore contents) ---
+# Loose/raw data artifacts are ignored by default; specific registered evaluation datasets
+# and their generated catalogs are tracked explicitly below.
 data/*
 !data/.gitkeep
+!data/README.md
+!data/registry.json
+!data/superstore.csv
+!data/catalog/
 
 # --- Notebooks ---
 .ipynb_checkpoints/

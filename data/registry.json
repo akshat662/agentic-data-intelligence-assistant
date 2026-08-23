@@ -1,0 +1,11 @@
+[
+  {
+    "dataset_id": "superstore",
+    "file_path": "data/superstore.csv",
+    "description": "US retail order-level sales data (the widely used 'Sample - Superstore' dataset): 9,994 orders across Furniture, Office Supplies, and Technology, with per-order Sales, Quantity, Discount, and Profit, plus Customer, Region/State/City, Ship Mode, and Order/Ship Date fields.",
+    "target_columns": [
+      "Profit",
+      "Sales"
+    ]
+  }
+]
