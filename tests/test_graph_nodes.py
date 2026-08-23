@@ -144,6 +144,48 @@ class TestExecuteToolsNode:
         assert evidence.tool == "profile_dataset"
 
     def test_unsupported_tool_family_produces_typed_error(self, superstore_catalog):
+        state = create_initial_state("Sales by segment?", "superstore")
+        step = PlanStep(
+            id="step_1",
+            intent="Compare.",
+            tool_family="compare_groups",
+            expected_output="group stats",
+            success_criteria="ok",
+        )
+        state = state.model_copy(update={"catalog": superstore_catalog, "plan": [step]})
+        update = execute_tools_node(state)
+        assert update["evidence"] == {}
+        assert len(update["errors"]) == 1
+        assert update["errors"][0].kind == ToolErrorKind.UNKNOWN
+
+    def test_runs_run_sql_step_with_mocked_argument_generator(
+        self, superstore_catalog, monkeypatch
+    ):
+        from adia.tools.run_sql import RunSqlArgs
+
+        monkeypatch.setattr(
+            "adia.graph.nodes.generate_tool_arguments",
+            lambda *a, **k: RunSqlArgs(query="SELECT Sales FROM superstore LIMIT 5"),
+        )
+        state = create_initial_state("Total sales by region?", "superstore")
+        step = PlanStep(
+            id="step_1",
+            intent="Aggregate.",
+            tool_family="run_sql",
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        state = state.model_copy(update={"catalog": superstore_catalog, "plan": [step]})
+        update = execute_tools_node(state)
+        assert update["errors"] == []
+        assert len(update["evidence"]) == 1
+        evidence = next(iter(update["evidence"].values()))
+        assert evidence.tool == "run_sql"
+
+    def test_run_sql_step_with_rejected_arguments_produces_typed_error(
+        self, superstore_catalog, monkeypatch
+    ):
+        monkeypatch.setattr("adia.graph.nodes.generate_tool_arguments", lambda *a, **k: None)
         state = create_initial_state("Total sales by region?", "superstore")
         step = PlanStep(
             id="step_1",
@@ -156,7 +198,7 @@ class TestExecuteToolsNode:
         update = execute_tools_node(state)
         assert update["evidence"] == {}
         assert len(update["errors"]) == 1
-        assert update["errors"][0].kind == ToolErrorKind.UNKNOWN
+        assert update["errors"][0].kind == ToolErrorKind.VALIDATION
 
     def test_no_plan_is_a_no_op(self, superstore_catalog):
         state = create_initial_state("How many rows?", "superstore")
