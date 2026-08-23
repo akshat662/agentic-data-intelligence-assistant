@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -15,7 +15,9 @@ from adia.tools.run_sql import RunSqlArgs
 from adia.tools.sql_guard import check_sql
 
 #: The tool families this module knows how to generate arguments for.
-_SUPPORTED_TOOL_FAMILIES = frozenset({"run_sql", "compare_groups", "compute_correlation", "train_model"})
+_SUPPORTED_TOOL_FAMILIES = frozenset(
+    {"run_sql", "compare_groups", "compute_correlation", "train_model"}
+)
 
 _SYSTEM_PROMPT = (
     "You are the argument-generation component of a data analysis system. Given one plan "
@@ -24,10 +26,14 @@ _SYSTEM_PROMPT = (
     "Rules:\n"
     "- Only reference columns that appear verbatim in the catalog. Never invent, guess, or "
     "assume a column exists.\n"
-    "- For run_sql: Propose a single read-only SELECT statement. Reference exactly one table, named after the dataset_id given below. Do not include a trailing semicolon or multiple statements.\n"
+    "- For run_sql: Propose a single read-only SELECT statement. Reference exactly one "
+    "table, named after the dataset_id given below. Do not include a trailing semicolon "
+    "or multiple statements.\n"
     "- For compare_groups: Propose a categorical group_column and a numeric metric_column.\n"
-    "- For compute_correlation: Propose a list of numeric columns to correlate, or null to correlate all numeric columns.\n"
-    "- For train_model: Propose a target_column, a list of feature_columns, the task_type (classification or regression), and the model_type.\n"
+    "- For compute_correlation: Propose a list of numeric columns to correlate, or null "
+    "to correlate all numeric columns.\n"
+    "- For train_model: Propose a target_column, a list of feature_columns, the "
+    "task_type (classification or regression), and the model_type.\n"
     "  - classification models: 'logistic_regression', 'random_forest_classifier'\n"
     "  - regression models: 'linear_regression', 'random_forest_regressor'\n"
 )
@@ -44,17 +50,26 @@ class _CompareGroupsLLMOutput(BaseModel):
 
 class _ComputeCorrelationLLMOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
-    columns: list[str] | None = Field(default=None, description="Numeric columns to correlate, or null for all numeric.")
+    columns: list[str] | None = Field(
+        default=None, description="Numeric columns to correlate, or null for all numeric."
+    )
 
 class _TrainModelLLMOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
     target_column: str = Field(description="Column to predict.")
     feature_columns: list[str] = Field(description="Numeric columns to use as features.")
-    task_type: Literal["classification", "regression"] = Field(description="The type of machine learning task.")
-    model_type: str = Field(description="The model type (e.g. logistic_regression, random_forest_classifier, linear_regression, random_forest_regressor).")
+    task_type: Literal["classification", "regression"] = Field(
+        description="The type of machine learning task."
+    )
+    model_type: str = Field(
+        description=(
+            "The model type (e.g. logistic_regression, random_forest_classifier, "
+            "linear_regression, random_forest_regressor)."
+        )
+    )
 
 
-OutputArgs = Union[RunSqlArgs, CompareGroupsArgs, ComputeCorrelationArgs, TrainModelArgs]
+OutputArgs = RunSqlArgs | CompareGroupsArgs | ComputeCorrelationArgs | TrainModelArgs
 
 #: Signature every `llm_call` -- real or a test's fake -- must satisfy.
 LLMCall = Callable[[PlanStep, DatasetCatalog], Any]
@@ -90,7 +105,9 @@ def generate_tool_arguments(
         return None
 
 
-def _build_args(raw: Any, tool_family: str, *, catalog: DatasetCatalog, dataset_id: str) -> OutputArgs:
+def _build_args(
+    raw: Any, tool_family: str, *, catalog: DatasetCatalog, dataset_id: str
+) -> OutputArgs:
     """Validate a raw LLM proposal and convert it into trusted, guarded arguments."""
     if tool_family == "run_sql":
         query = raw.query.strip()
