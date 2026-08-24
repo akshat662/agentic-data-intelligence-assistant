@@ -46,6 +46,31 @@ def _mock_planner(monkeypatch, *, tool_family="profile_dataset"):
     monkeypatch.setattr("adia.graph.nodes.create_plan", _plan)
 
 
+def _mock_partial_plan(monkeypatch):
+    """Two-step plan where only the first step's tool_family is supported -- exercises
+    partial evidence_coverage without needing any LLM/ArgGen call."""
+
+    def _plan(question, catalog, feasibility):
+        return [
+            PlanStep(
+                id="step_1",
+                intent="Supported step.",
+                tool_family="profile_dataset",
+                expected_output="stats",
+                success_criteria="ok",
+            ),
+            PlanStep(
+                id="step_2",
+                intent="Unsupported step.",
+                tool_family="magic_tool",
+                expected_output="n/a",
+                success_criteria="ok",
+            ),
+        ]
+
+    monkeypatch.setattr("adia.graph.nodes.create_plan", _plan)
+
+
 def _question(**overrides) -> BenchmarkQuestion:
     defaults = dict(
         id="q001",
@@ -71,6 +96,10 @@ class TestRunQuestion:
         assert result.final_answer is not None
         assert result.error is None
         assert result.duration_ms >= 0
+        assert result.plan_step_count == 1
+        assert result.executed_step_count == 1
+        assert result.evidence_count == 1
+        assert result.evidence_coverage == 1.0
 
     def test_unanswerable_question_records_refusal_without_tools(self, monkeypatch):
         _mock_infeasible(monkeypatch)
@@ -87,6 +116,20 @@ class TestRunQuestion:
         assert result.feasibility_verdict == "infeasible"
         assert result.tools_used == []
         assert result.final_answer is not None
+        # Refusal routes around the planner entirely -- there is no plan to have a coverage of.
+        assert result.plan_step_count == 0
+        assert result.executed_step_count == 0
+        assert result.evidence_count == 0
+        assert result.evidence_coverage is None
+
+    def test_partial_plan_execution_reports_fractional_coverage(self, monkeypatch):
+        _mock_feasible(monkeypatch)
+        _mock_partial_plan(monkeypatch)
+        result = run_question(_question())
+        assert result.plan_step_count == 2
+        assert result.executed_step_count == 1
+        assert result.evidence_count == 1
+        assert result.evidence_coverage == 0.5
 
     def test_unregistered_dataset_does_not_crash_the_runner(self):
         result = run_question(_question(dataset_id="nonexistent_dataset"))

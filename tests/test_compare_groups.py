@@ -59,6 +59,12 @@ class TestValidComparison:
         result = compare_groups("orders", dataset_path, "region", "price", store)
         assert result.data["group_count"] == 3
 
+    def test_causal_claim_not_allowed(self, dataset_path, store):
+        # A difference in group means is descriptive only -- validate_answer relies on this
+        # flag to reject causal language in any answer that cites this evidence.
+        result = compare_groups("orders", dataset_path, "region", "price", store)
+        assert result.data["causal_claim_allowed"] is False
+
     def test_rows_with_missing_group_are_excluded(self, dataset_path, store):
         result = compare_groups("orders", dataset_path, "region", "price", store)
         total = sum(g["count"] for g in result.data["groups"])

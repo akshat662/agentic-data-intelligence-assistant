@@ -27,6 +27,7 @@ from adia.data.registry import get_dataset_config, load_registry
 from adia.evidence.renderer import render_evidence_context
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolError, ToolErrorKind
+from adia.models.plan import PlanStep
 from adia.models.state import AgentState, FeasibilityResult, FeasibilityVerdict
 from adia.tools.compare_groups import compare_groups
 from adia.tools.correlation import compute_correlation
@@ -151,11 +152,89 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     return {"plan": plan}
 
 
-def execute_tools_node(state: AgentState) -> dict[str, Any]:
-    """Dispatch each plan step to its tool, deterministically, via the real tool layer.
+def _topological_order(plan: list[PlanStep]) -> tuple[list[PlanStep], list[ToolError]]:
+    """Order plan steps so every step runs after everything it `depends_on` (Kahn's algorithm).
 
-    `profile_dataset` needs nothing beyond the dataset itself and runs directly.
-    Other tools need arguments, which `generate_tool_arguments` (`adia.agents.argument_generator`)
+    A step whose `depends_on` names a step_id absent from this same plan can't be ordered at
+    all -- defense in depth, since `create_plan` already rejects this at proposal time, but a
+    directly-constructed or mocked plan (tests, a future caller) might not go through that
+    check. A dependency cycle leaves one or more steps permanently unready; both cases produce
+    a typed `ToolError` (`kind=VALIDATION`) per affected step rather than raising or silently
+    dropping them.
+
+    Args:
+        plan: The plan steps to order, in their original (proposed) order.
+
+    Returns:
+        `(ordered_steps, errors)`. `ordered_steps` holds every step that could be placed, each
+        appearing after all of its own dependencies. `errors` holds one `ToolError` per step
+        that couldn't be placed (unknown dependency or cycle membership) -- those steps are
+        simply absent from `ordered_steps`, not retried or guessed at.
+    """
+    by_id = {step.id: step for step in plan}
+    errors: list[ToolError] = []
+
+    valid_steps: list[PlanStep] = []
+    for step in plan:
+        unknown_deps = [d for d in step.depends_on if d not in by_id]
+        if unknown_deps:
+            errors.append(
+                ToolError(
+                    kind=ToolErrorKind.VALIDATION,
+                    message=(
+                        f"Plan step '{step.id}' depends on unknown step(s): {unknown_deps}."
+                    ),
+                    retryable=False,
+                )
+            )
+        else:
+            valid_steps.append(step)
+
+    in_degree = {step.id: len(step.depends_on) for step in valid_steps}
+    dependents: dict[str, list[str]] = {step.id: [] for step in valid_steps}
+    for step in valid_steps:
+        for dep in step.depends_on:
+            dependents[dep].append(step.id)
+
+    queue = [step.id for step in valid_steps if in_degree[step.id] == 0]
+    ordered: list[PlanStep] = []
+    while queue:
+        step_id = queue.pop(0)
+        ordered.append(by_id[step_id])
+        for dependent_id in dependents[step_id]:
+            in_degree[dependent_id] -= 1
+            if in_degree[dependent_id] == 0:
+                queue.append(dependent_id)
+
+    ordered_ids = {step.id for step in ordered}
+    for step in valid_steps:
+        if step.id not in ordered_ids:
+            errors.append(
+                ToolError(
+                    kind=ToolErrorKind.VALIDATION,
+                    message=f"Plan step '{step.id}' is part of a dependency cycle.",
+                    retryable=False,
+                )
+            )
+
+    return ordered, errors
+
+
+def execute_tools_node(state: AgentState) -> dict[str, Any]:
+    """Dispatch each plan step to its tool, in dependency order, via the real tool layer.
+
+    Steps run in topological order (`_topological_order`, Kahn's algorithm) so that every
+    step's dependencies have already executed -- and already written their evidence to
+    `store` -- before it runs. A step with `depends_on` gets that evidence rendered
+    (`render_evidence_context`, unchanged) and passed to `generate_tool_arguments` as
+    `dependency_context`, so its proposed arguments can be grounded in a prior step's finding
+    (e.g. filtering on a category a dependency step identified) rather than only the dataset
+    catalog. A step with no dependencies gets `dependency_context=""`, the same as before this
+    existed. An unresolvable dependency or a cycle becomes a typed `ToolError`
+    (`kind=VALIDATION`) for the affected step(s) rather than an exception.
+
+    `profile_dataset` needs nothing beyond the dataset itself and runs directly. Other tools
+    need arguments, which `generate_tool_arguments` (`adia.agents.argument_generator`)
     proposes via an LLM and then validates in Python before anything is trusted. A rejected
     or unreachable proposal becomes a typed `ToolError` (`kind=VALIDATION`), never a guessed
     argument. A plan step naming any unsupported `tool_family` becomes a typed `ToolError`
@@ -171,8 +250,8 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
     for existing in state.evidence.values():
         store.add(existing)
 
-    new_errors: list[ToolError] = []
-    for step in state.plan:
+    ordered_steps, new_errors = _topological_order(state.plan)
+    for step in ordered_steps:
         if step.tool_family not in _SUPPORTED_TOOL_FAMILIES:
             new_errors.append(
                 ToolError(
@@ -194,7 +273,22 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                 plan_step_id=step.id,
             )
         else:
-            args = generate_tool_arguments(step, state.catalog, state.catalog.dataset_id)
+            dependency_context = ""
+            if step.depends_on:
+                dependency_evidence = [
+                    evidence
+                    for dep_id in step.depends_on
+                    for evidence in store.list(plan_step_id=dep_id)
+                ]
+                if dependency_evidence:
+                    dependency_context = render_evidence_context(dependency_evidence)
+
+            args = generate_tool_arguments(
+                step,
+                state.catalog,
+                state.catalog.dataset_id,
+                dependency_context=dependency_context,
+            )
             if args is None:
                 new_errors.append(
                     ToolError(
@@ -207,25 +301,25 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                     )
                 )
                 continue
-            
+
             if step.tool_family == "run_sql":
                 result = run_sql(args.query, state.catalog, store, plan_step_id=step.id)
             elif step.tool_family == "compare_groups":
                 result = compare_groups(
-                    args.dataset_id, 
-                    args.source_path, 
-                    args.group_column, 
-                    args.metric_column, 
-                    store, 
-                    plan_step_id=step.id
+                    args.dataset_id,
+                    args.source_path,
+                    args.group_column,
+                    args.metric_column,
+                    store,
+                    plan_step_id=step.id,
                 )
             elif step.tool_family == "compute_correlation":
                 result = compute_correlation(
-                    args.dataset_id, 
-                    args.source_path, 
-                    store, 
-                    columns=args.columns, 
-                    plan_step_id=step.id
+                    args.dataset_id,
+                    args.source_path,
+                    store,
+                    columns=args.columns,
+                    plan_step_id=step.id,
                 )
             elif step.tool_family == "train_model":
                 result = train_model(
@@ -236,7 +330,7 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                     args.task_type,
                     args.model_type,
                     store,
-                    plan_step_id=step.id
+                    plan_step_id=step.id,
                 )
 
         if not result.ok:

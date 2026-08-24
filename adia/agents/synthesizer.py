@@ -53,7 +53,18 @@ _SYSTEM_PROMPT = (
     "number is not already present in the evidence exactly as given, do not state it.\n"
     "- Never introduce facts, numbers, or claims that are not present in the evidence below.\n"
     "- Only cite evidence IDs that appear in the evidence below; never invent one.\n"
-    "- Write plain prose explaining what the evidence shows, not a raw data dump."
+    "- Write plain prose explaining what the evidence shows, not a raw data dump.\n\n"
+    "When the evidence includes more than one analysis step (e.g. an observation plus "
+    "several supporting analyses that were run to investigate it), keep three things "
+    "distinct in your answer:\n"
+    "- The observed fact itself (e.g. which group has the extreme value), stated plainly.\n"
+    "- What the supporting evidence is associated with -- describe a pattern the other "
+    "evidence shows using non-causal language ('is associated with', 'coincides with', "
+    "'the data suggests'), never asserting that one thing caused another.\n"
+    "- What remains unsupported -- if the evidence cannot establish why something happened "
+    "(no cited evidence explicitly permits causal language -- see the rules on causal "
+    "claims already enforced downstream), say so explicitly rather than implying a cause. "
+    "Correlation or comparison evidence describes what co-occurs, not what causes what."
 )
 
 

@@ -5,8 +5,11 @@ set, `adia.graph.workflow.run_graph` for the actual pipeline, `adia.graph.state`
 run. It adds no judgment of its own about correctness: whether an answer matches an
 independent oracle is Phase 3 scope (see `bench/README.md`). What this records is narrower and
 purely observational -- did the run complete without crashing, what verdict feasibility
-reached, which tools actually produced evidence, did the answer pass static validation, and
-what the final answer text was -- one `QuestionResult` per question, saved as one JSON array.
+reached, which tools actually produced evidence, how many plan steps were proposed versus
+actually executed, did the answer pass static validation, and what the final answer text was
+-- one `QuestionResult` per question, saved as one JSON array. Turning these observations into
+tier-grouped, direct-vs-investigation comparison metrics is `bench/evaluation_report.py`'s job,
+not this module's -- this module only records what happened, once, per question.
 """
 
 import json
@@ -52,6 +55,24 @@ class QuestionResult(BaseModel):
     )
     duration_ms: float = Field(..., ge=0)
 
+    plan_step_count: int = Field(
+        default=0, ge=0, description="Number of steps the planner proposed."
+    )
+    executed_step_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of those plan steps that actually produced evidence -- bounded "
+        "by plan_step_count; lower than it means a step was rejected or failed.",
+    )
+    evidence_count: int = Field(
+        default=0, ge=0, description="Total evidence records produced by the run."
+    )
+    evidence_coverage: float | None = Field(
+        default=None,
+        description="executed_step_count / plan_step_count, or None when no plan was "
+        "proposed (e.g. a refused question) -- there is nothing to cover.",
+    )
+
 
 def run_question(question: BenchmarkQuestion) -> QuestionResult:
     """Run one benchmark question through the full graph and record its outcome.
@@ -72,6 +93,16 @@ def run_question(question: BenchmarkQuestion) -> QuestionResult:
     try:
         initial_state = create_initial_state(question.question, question.dataset_id)
         final_state = run_graph(initial_state)
+
+        plan_step_ids = {step.id for step in final_state.plan}
+        executed_step_ids = {
+            evidence.plan_step_id
+            for evidence in final_state.evidence.values()
+            if evidence.plan_step_id in plan_step_ids
+        }
+        plan_step_count = len(plan_step_ids)
+        executed_step_count = len(executed_step_ids)
+
         return QuestionResult(
             question_id=question.id,
             dataset_id=question.dataset_id,
@@ -91,6 +122,12 @@ def run_question(question: BenchmarkQuestion) -> QuestionResult:
             ),
             final_answer=final_state.final_answer,
             duration_ms=_elapsed_ms(started),
+            plan_step_count=plan_step_count,
+            executed_step_count=executed_step_count,
+            evidence_count=len(final_state.evidence),
+            evidence_coverage=(
+                executed_step_count / plan_step_count if plan_step_count else None
+            ),
         )
     except Exception as exc:  # one bad question must never abort the whole benchmark run
         return QuestionResult(

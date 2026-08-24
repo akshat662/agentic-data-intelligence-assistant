@@ -4,7 +4,13 @@ import json
 from pathlib import Path
 
 import pytest
-from bench.schema import BenchmarkQuestion, QuestionCategory, load_questions
+from bench.schema import (
+    BenchmarkQuestion,
+    EvaluationTier,
+    InvestigationExpectation,
+    QuestionCategory,
+    load_questions,
+)
 from pydantic import ValidationError
 
 _SHIPPED_QUESTIONS_PATH = Path(__file__).parent.parent / "bench" / "questions.json"
@@ -57,6 +63,78 @@ class TestBenchmarkQuestionValidation:
         del payload["gold_tools"]
         question = BenchmarkQuestion(**payload)
         assert question.gold_tools == []
+
+
+class TestEvaluationTier:
+    def test_direct_categories_map_to_direct_tier(self):
+        for category in (
+            "descriptive",
+            "sql_aggregation",
+            "statistical_comparison",
+            "predictive",
+        ):
+            question = BenchmarkQuestion(**_question(category=category))
+            assert question.evaluation_tier == EvaluationTier.DIRECT
+
+    def test_root_cause_maps_to_investigation_tier(self):
+        question = BenchmarkQuestion(**_question(category="root_cause"))
+        assert question.evaluation_tier == EvaluationTier.INVESTIGATION
+
+    def test_unanswerable_maps_to_refusal_tier(self):
+        question = BenchmarkQuestion(
+            **_question(category="unanswerable", answerable=False, gold_tools=[])
+        )
+        assert question.evaluation_tier == EvaluationTier.REFUSAL
+
+    def test_evaluation_tier_is_not_a_stored_field(self):
+        # Existing question JSON (no "evaluation_tier" key) must remain valid -- it's computed,
+        # not required input.
+        question = BenchmarkQuestion(**_question())
+        assert "evaluation_tier" not in question.model_dump()
+
+
+class TestInvestigationExpectation:
+    def _investigation(self, **overrides) -> dict:
+        defaults = dict(
+            expected_observation="Office Supplies has the lowest total Sales.",
+            expected_analysis_dimensions=["order volume", "average order value"],
+            acceptable_conclusion_style="States the fact plainly; hedges any explanation.",
+            forbidden_causal_phrases=["causes", "due to"],
+        )
+        defaults.update(overrides)
+        return defaults
+
+    def test_valid_investigation_metadata_on_root_cause_question(self):
+        question = BenchmarkQuestion(
+            **_question(category="root_cause", investigation=self._investigation())
+        )
+        assert question.investigation is not None
+        assert question.investigation.expected_analysis_dimensions == [
+            "order volume",
+            "average order value",
+        ]
+
+    def test_investigation_defaults_to_none(self):
+        question = BenchmarkQuestion(**_question())
+        assert question.investigation is None
+
+    def test_investigation_on_non_root_cause_category_rejected(self):
+        with pytest.raises(ValidationError, match="only be set on 'root_cause'"):
+            BenchmarkQuestion(
+                **_question(category="descriptive", investigation=self._investigation())
+            )
+
+    def test_forbidden_causal_phrases_defaults_to_empty_list(self):
+        payload = self._investigation()
+        del payload["forbidden_causal_phrases"]
+        expectation = InvestigationExpectation(**payload)
+        assert expectation.forbidden_causal_phrases == []
+
+    def test_missing_expected_observation_rejected(self):
+        payload = self._investigation()
+        del payload["expected_observation"]
+        with pytest.raises(ValidationError):
+            InvestigationExpectation(**payload)
 
 
 class TestLoadQuestions:
@@ -120,3 +198,24 @@ class TestShippedQuestionsFile:
         for question in questions:
             if question.category == QuestionCategory.UNANSWERABLE:
                 assert question.gold_tools == []
+
+    def test_shipped_root_cause_questions_all_have_investigation_metadata(self):
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        for question in questions:
+            if question.category == QuestionCategory.ROOT_CAUSE:
+                assert question.investigation is not None
+                assert question.investigation.expected_analysis_dimensions
+                assert question.investigation.forbidden_causal_phrases
+
+    def test_shipped_non_root_cause_questions_have_no_investigation_metadata(self):
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        for question in questions:
+            if question.category != QuestionCategory.ROOT_CAUSE:
+                assert question.investigation is None
+
+    def test_shipped_file_tier_distribution(self):
+        questions = load_questions(_SHIPPED_QUESTIONS_PATH)
+        tiers = [q.evaluation_tier for q in questions]
+        assert tiers.count(EvaluationTier.DIRECT) == 16
+        assert tiers.count(EvaluationTier.INVESTIGATION) == 4
+        assert tiers.count(EvaluationTier.REFUSAL) == 5

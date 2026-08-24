@@ -12,6 +12,7 @@ from adia.data.loader import load_dataset
 from adia.evidence.store import EvidenceStore
 from adia.graph.nodes import (
     VALIDATION_FALLBACK_ANSWER,
+    _topological_order,
     execute_tools_node,
     feasibility_node,
     planner_node,
@@ -126,6 +127,74 @@ class TestPlannerNode:
         state = create_initial_state("How many rows?", "superstore")
         state = state.model_copy(update={"catalog": superstore_catalog})
         assert planner_node(state) == {}
+
+
+class TestTopologicalOrder:
+    def _step(self, step_id: str, depends_on: list[str] | None = None) -> PlanStep:
+        return PlanStep(
+            id=step_id,
+            intent="do something",
+            tool_family="run_sql",
+            depends_on=depends_on or [],
+            expected_output="rows",
+            success_criteria="ok",
+        )
+
+    def test_single_step_no_dependencies(self):
+        a = self._step("a")
+        ordered, errors = _topological_order([a])
+        assert ordered == [a]
+        assert errors == []
+
+    def test_orders_dependent_step_after_its_dependency_even_when_listed_first(self):
+        a = self._step("a")
+        b = self._step("b", depends_on=["a"])
+        ordered, errors = _topological_order([b, a])  # deliberately out of order
+        assert [step.id for step in ordered] == ["a", "b"]
+        assert errors == []
+
+    def test_independent_steps_preserve_original_relative_order(self):
+        a, b, c = self._step("a"), self._step("b"), self._step("c")
+        ordered, errors = _topological_order([a, b, c])
+        assert [step.id for step in ordered] == ["a", "b", "c"]
+        assert errors == []
+
+    def test_diamond_dependencies_ordered_correctly(self):
+        a = self._step("a")
+        b = self._step("b", depends_on=["a"])
+        c = self._step("c", depends_on=["a"])
+        d = self._step("d", depends_on=["b", "c"])
+        ordered, errors = _topological_order([d, c, b, a])
+        ids = [step.id for step in ordered]
+        assert ids[0] == "a"
+        assert ids[-1] == "d"
+        assert set(ids[1:3]) == {"b", "c"}
+        assert errors == []
+
+    def test_two_step_cycle_produces_typed_error_for_both_steps(self):
+        a = self._step("a", depends_on=["b"])
+        b = self._step("b", depends_on=["a"])
+        ordered, errors = _topological_order([a, b])
+        assert ordered == []
+        assert len(errors) == 2
+        assert all(e.kind == ToolErrorKind.VALIDATION for e in errors)
+
+    def test_unknown_dependency_produces_typed_error(self):
+        a = self._step("a", depends_on=["ghost"])
+        ordered, errors = _topological_order([a])
+        assert ordered == []
+        assert len(errors) == 1
+        assert errors[0].kind == ToolErrorKind.VALIDATION
+        assert "ghost" in errors[0].message
+
+    def test_partial_cycle_still_orders_the_valid_portion(self):
+        a = self._step("a")
+        b = self._step("b", depends_on=["c"])
+        c = self._step("c", depends_on=["b"])
+        ordered, errors = _topological_order([a, b, c])
+        assert [step.id for step in ordered] == ["a"]
+        assert len(errors) == 2
+        assert {e.kind for e in errors} == {ToolErrorKind.VALIDATION}
 
 
 class TestExecuteToolsNode:
@@ -258,6 +327,107 @@ class TestExecuteToolsNode:
         # recomputation, proving the seed actually took effect rather than being ignored.
         assert existing.id in update["evidence"]
         assert update["evidence"][existing.id].data["row_count"] == 9994
+
+    def test_dependent_step_receives_dependency_evidence_even_when_listed_first(
+        self, superstore_catalog, monkeypatch
+    ):
+        from adia.tools.run_sql import RunSqlArgs
+
+        captured_contexts: dict[str, str] = {}
+
+        def _fake_generate_tool_arguments(
+            step, catalog, dataset_id, *, dependency_context="", **kwargs
+        ):
+            captured_contexts[step.id] = dependency_context
+            # Distinct queries per step -- identical queries would resolve to the same
+            # content-addressed evidence ID and collapse into a single cached record.
+            limit = 1 if step.id == "anchor" else 2
+            return RunSqlArgs(query=f"SELECT Sales FROM superstore LIMIT {limit}")
+
+        monkeypatch.setattr(
+            "adia.graph.nodes.generate_tool_arguments", _fake_generate_tool_arguments
+        )
+
+        anchor = PlanStep(
+            id="anchor",
+            intent="Find the category with the lowest total Sales.",
+            tool_family="run_sql",
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        dependent = PlanStep(
+            id="dependent",
+            intent="Check order volume for that category.",
+            tool_family="run_sql",
+            depends_on=["anchor"],
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        # Listed dependent-first, deliberately out of dependency order.
+        state = create_initial_state("Why is that category lowest?", "superstore")
+        state = state.model_copy(
+            update={"catalog": superstore_catalog, "plan": [dependent, anchor]}
+        )
+        update = execute_tools_node(state)
+
+        assert update["errors"] == []
+        assert len(update["evidence"]) == 2
+        assert captured_contexts["anchor"] == ""
+        assert captured_contexts["dependent"] != ""
+
+    def test_step_with_no_dependencies_gets_empty_dependency_context(
+        self, superstore_catalog, monkeypatch
+    ):
+        from adia.tools.run_sql import RunSqlArgs
+
+        captured = {}
+
+        def _fake_generate_tool_arguments(
+            step, catalog, dataset_id, *, dependency_context="", **kwargs
+        ):
+            captured["dependency_context"] = dependency_context
+            return RunSqlArgs(query="SELECT Sales FROM superstore LIMIT 1")
+
+        monkeypatch.setattr(
+            "adia.graph.nodes.generate_tool_arguments", _fake_generate_tool_arguments
+        )
+        step = PlanStep(
+            id="step_1",
+            intent="Aggregate.",
+            tool_family="run_sql",
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        state = create_initial_state("Total sales?", "superstore")
+        state = state.model_copy(update={"catalog": superstore_catalog, "plan": [step]})
+        execute_tools_node(state)
+        assert captured["dependency_context"] == ""
+
+    def test_cyclic_plan_produces_typed_errors_without_crash(self, superstore_catalog):
+        step_a = PlanStep(
+            id="a",
+            intent="a",
+            tool_family="run_sql",
+            depends_on=["b"],
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        step_b = PlanStep(
+            id="b",
+            intent="b",
+            tool_family="run_sql",
+            depends_on=["a"],
+            expected_output="rows",
+            success_criteria="ok",
+        )
+        state = create_initial_state("Why?", "superstore")
+        state = state.model_copy(
+            update={"catalog": superstore_catalog, "plan": [step_a, step_b]}
+        )
+        update = execute_tools_node(state)
+        assert update["evidence"] == {}
+        assert len(update["errors"]) == 2
+        assert all(e.kind == ToolErrorKind.VALIDATION for e in update["errors"])
 
 
 class TestSynthesizerNode:

@@ -153,7 +153,13 @@
       "question": "Why is total Profit lower in the Central region than in the West region?",
       "answerable": true,
       "gold_tools": ["run_sql", "compare_groups"],
-      "notes": "No dedicated segment-contribution/decomposition tool exists yet; answerable today only as an aggregation-plus-comparison, not a full volume-vs-rate decomposition."
+      "notes": "No dedicated segment-contribution/decomposition tool exists yet; answerable today only as an aggregation-plus-comparison, not a full volume-vs-rate decomposition.",
+      "investigation": {
+        "expected_observation": "Total Profit in the Central region is lower than in the West region.",
+        "expected_analysis_dimensions": ["average Sales per order", "average Discount", "Category mix", "Sub-Category mix"],
+        "acceptable_conclusion_style": "States the Central-vs-West Profit gap plainly and cites it. Describes any supporting comparison (e.g. Discount or Category-mix differences) as 'associated with' or 'coincides with' the gap, never as its cause. Explicitly notes the dataset lacks the operational/cost data needed to establish a definitive cause.",
+        "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
+      }
     },
     {
       "id": "q018",
@@ -199,6 +205,51 @@
       "answerable": false,
       "gold_tools": [],
       "notes": "Requires external competitor data that is not present in, or inferable from, this dataset."
+    },
+    {
+      "id": "q023",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why does the Office Supplies category have the lowest total Sales among the three categories?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "Investigation question: expects an observation step (total Sales per Category) plus supporting-analysis steps testing distinct candidate explanations (order volume, average order value, Sub-Category mix), not a single lookup. The dataset has no customer-preference or market data, so any causal 'why' must be reported as an unsupported claim, not established.",
+      "investigation": {
+        "expected_observation": "Office Supplies has the lowest total Sales among the three categories.",
+        "expected_analysis_dimensions": ["order volume", "average order value", "Sub-Category mix", "Discount", "Region mix"],
+        "acceptable_conclusion_style": "States the Office-Supplies-lowest fact plainly and cites it. Describes any supporting evidence (e.g. lower average order value, Sub-Category mix) as 'associated with' the lower total Sales, never as its cause. Explicitly notes the dataset lacks customer-preference or market data needed for a true causal explanation.",
+        "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
+      }
+    },
+    {
+      "id": "q024",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why is average Profit lower in the Consumer segment than in the Corporate segment?",
+      "answerable": true,
+      "gold_tools": ["compare_groups", "run_sql"],
+      "notes": "Investigation question: expects an observation step (average Profit per Segment) plus supporting analyses (Discount differences, Category mix, Region mix by segment). compare_groups evidence is descriptive only (causal_claim_allowed=False), so the conclusion may describe association, not cause.",
+      "investigation": {
+        "expected_observation": "Average Profit is lower in the Consumer segment than in the Corporate segment.",
+        "expected_analysis_dimensions": ["average Discount", "Category mix", "average Sales per order", "Region mix"],
+        "acceptable_conclusion_style": "States the Consumer-vs-Corporate Profit gap plainly and cites it. Describes any supporting comparison (e.g. Discount or Category-mix differences) as 'associated with' the gap, never as its cause. Explicitly notes compare_groups evidence cannot establish causation.",
+        "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
+      }
+    },
+    {
+      "id": "q025",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why is the average Discount higher in the Furniture category than in the Technology category?",
+      "answerable": true,
+      "gold_tools": ["compare_groups", "run_sql"],
+      "notes": "Investigation question: expects an observation step (average Discount per Category) plus supporting analyses (Sub-Category or Region breakdown within Furniture). No promotional/pricing-policy data exists in this dataset, so a causal explanation cannot be established, only an association.",
+      "investigation": {
+        "expected_observation": "Average Discount is higher in the Furniture category than in the Technology category.",
+        "expected_analysis_dimensions": ["Sub-Category mix within Furniture", "Region mix", "average Profit by Category"],
+        "acceptable_conclusion_style": "States the Furniture-vs-Technology Discount gap plainly and cites it. Describes any supporting comparison as 'associated with' the gap, never as its cause. Explicitly notes no promotional or pricing-policy data exists to establish a definitive cause.",
+        "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
+      }
     }
   ]
 }

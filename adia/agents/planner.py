@@ -70,7 +70,17 @@ _SYSTEM_PROMPT = (
     "- Each step needs a step_id you choose and is unique within this plan (e.g. 'step_1'), "
     "a tool_family from the list above, a one-sentence purpose, and depends_on listing any "
     "OTHER step_id in this same plan that must run first (usually empty).\n"
-    "- Do not propose tool arguments, SQL text, or column selections -- only the plan shape."
+    "- Do not propose tool arguments, SQL text, or column selections -- only the plan shape.\n\n"
+    "For a 'why'/'how' investigation question (asking for a reason or explanation, not just a "
+    "number), shape the plan as an investigation rather than a single lookup:\n"
+    "- One observation step first, with empty depends_on, that establishes the fact being "
+    "explained (e.g. which category/group has the extreme value).\n"
+    "- Several supporting-analysis steps after it, each with depends_on listing the "
+    "observation step's step_id, each testing one distinct possible explanation (e.g. order "
+    "volume, average order value, a regional/segment split, a sub-category breakdown) rather "
+    "than all reproducing the same comparison.\n"
+    "- Do not propose a step whose only purpose is to state a causal conclusion -- that is the "
+    "Synthesizer's job, from the evidence these steps produce, not something any tool computes."
 )
 
 

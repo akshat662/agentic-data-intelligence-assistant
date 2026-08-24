@@ -80,6 +80,7 @@ def generate_tool_arguments(
     catalog: DatasetCatalog,
     dataset_id: str,
     *,
+    dependency_context: str = "",
     llm_call: LLMCall | None = None,
 ) -> OutputArgs | None:
     """Propose and validate arguments for one plan step.
@@ -88,6 +89,16 @@ def generate_tool_arguments(
         step: The plan step to generate arguments for.
         catalog: The dataset's catalog.
         dataset_id: The dataset this query must be scoped to.
+        dependency_context: Rendered evidence (e.g. from
+            `adia.evidence.renderer.render_evidence_context`) produced by this step's own
+            `depends_on` steps, if any -- shown to the LLM alongside the catalog so it can
+            ground its proposal in a prior step's finding (e.g. a category identified
+            upstream) instead of only the dataset schema. Defaults to `""`, which produces
+            the exact same prompt as before this parameter existed -- every dependency-free
+            step (the only kind that existed previously) is unaffected. Only reaches the real
+            LLM call path; a caller-supplied `llm_call` still receives just `(step, catalog)`,
+            unchanged, so it can be threaded straight to a rendering helper without knowing
+            about this parameter.
         llm_call: Override for the LLM call, e.g. a fake for tests.
 
     Returns:
@@ -97,9 +108,12 @@ def generate_tool_arguments(
     if step.tool_family not in _SUPPORTED_TOOL_FAMILIES:
         return None
 
-    resolved_call = llm_call or _call_openai
     try:
-        raw = resolved_call(step, catalog)
+        raw = (
+            llm_call(step, catalog)
+            if llm_call is not None
+            else _call_openai(step, catalog, dependency_context)
+        )
         return _build_args(raw, step.tool_family, catalog=catalog, dataset_id=dataset_id)
     except Exception:  # the LLM is never trusted to be reachable or well-behaved
         return None
@@ -156,11 +170,11 @@ def _build_args(
     raise ValueError(f"Unsupported tool family: {tool_family}")
 
 
-def _call_openai(step: PlanStep, catalog: DatasetCatalog) -> Any:
+def _call_openai(step: PlanStep, catalog: DatasetCatalog, dependency_context: str = "") -> Any:
     """The real LLM call: build a `ChatOpenAI` client from the environment and invoke it."""
     settings = load_llm_settings()
     model = ChatOpenAI(model=settings.model, api_key=settings.api_key, temperature=0)
-    
+
     schema_map = {
         "run_sql": _RunSqlLLMOutput,
         "compare_groups": _CompareGroupsLLMOutput,
@@ -168,16 +182,31 @@ def _call_openai(step: PlanStep, catalog: DatasetCatalog) -> Any:
         "train_model": _TrainModelLLMOutput,
     }
     structured_model = model.with_structured_output(schema_map[step.tool_family])
-    messages = _build_messages(step, catalog)
+    messages = _build_messages(step, catalog, dependency_context)
     return structured_model.invoke(messages)
 
 
-def _build_messages(step: PlanStep, catalog: DatasetCatalog) -> list[BaseMessage]:
-    """Build the prompt: the fixed system rules plus the step's intent and the exact catalog."""
+def _build_messages(
+    step: PlanStep, catalog: DatasetCatalog, dependency_context: str = ""
+) -> list[BaseMessage]:
+    """Build the prompt: the fixed system rules plus the step's intent and the exact catalog.
+
+    Args:
+        step: The plan step to generate arguments for.
+        catalog: The dataset's catalog.
+        dependency_context: Rendered evidence from this step's own dependency steps, if any.
+            When blank (the default, and the only case that existed before this parameter),
+            the prompt is byte-identical to before -- no extra section is added.
+    """
     column_lines = "\n".join(f"- {col.name} ({col.semantic_type.value})" for col in catalog.columns)
     human_content = (
         f"Dataset: {catalog.dataset_id} ({catalog.row_count} rows)\n"
         f"Columns:\n{column_lines}\n\n"
         f"Plan step intent: {step.intent}"
     )
+    if dependency_context:
+        human_content += (
+            "\n\nFindings from steps this one depends on (ground your proposal in these "
+            f"where relevant):\n{dependency_context}"
+        )
     return [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=human_content)]

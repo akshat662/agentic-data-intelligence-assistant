@@ -167,6 +167,71 @@ class TestBuildMessages:
         assert "region" in human
         assert catalog.dataset_id in human
 
+    def test_blank_dependency_context_produces_identical_prompt(self, catalog, run_sql_step):
+        # Backward compatibility: the default ("") must produce the exact same prompt as
+        # before this parameter existed.
+        with_default = _build_messages(run_sql_step, catalog)
+        with_explicit_blank = _build_messages(run_sql_step, catalog, "")
+        assert with_default[1].content == with_explicit_blank[1].content
+
+    def test_nonblank_dependency_context_is_included(self, catalog, run_sql_step):
+        messages = _build_messages(run_sql_step, catalog, "prior finding: region = 'West'")
+        human = messages[1].content
+        assert "prior finding: region = 'West'" in human
+        assert run_sql_step.intent in human  # base content is still present, not replaced
+
+
+class TestDependencyContextWiring:
+    """Covers the dependency-evidence handoff: `execute_tools_node` renders a dependency
+    step's evidence and passes it through as `dependency_context` -- this tests that
+    `generate_tool_arguments` forwards it to the real LLM call path without disturbing the
+    `llm_call` override contract every other test in this file relies on."""
+
+    def test_dependency_context_reaches_the_real_call_path(
+        self, catalog, run_sql_step, monkeypatch
+    ):
+        captured = {}
+
+        def _fake_call_openai(step, catalog, dependency_context=""):
+            captured["dependency_context"] = dependency_context
+            return _RunSqlLLMOutput(query="SELECT price FROM orders")
+
+        monkeypatch.setattr("adia.agents.argument_generator._call_openai", _fake_call_openai)
+        args = generate_tool_arguments(
+            run_sql_step, catalog, "orders", dependency_context="region = 'West' [[ev_x]]"
+        )
+        assert args is not None
+        assert captured["dependency_context"] == "region = 'West' [[ev_x]]"
+
+    def test_default_dependency_context_is_blank_on_the_real_call_path(
+        self, catalog, run_sql_step, monkeypatch
+    ):
+        captured = {}
+
+        def _fake_call_openai(step, catalog, dependency_context=""):
+            captured["dependency_context"] = dependency_context
+            return _RunSqlLLMOutput(query="SELECT price FROM orders")
+
+        monkeypatch.setattr("adia.agents.argument_generator._call_openai", _fake_call_openai)
+        generate_tool_arguments(run_sql_step, catalog, "orders")
+        assert captured["dependency_context"] == ""
+
+    def test_llm_call_override_is_unaffected_by_dependency_context(
+        self, catalog, run_sql_step
+    ):
+        # The existing llm_call contract (step, catalog) -> raw output must be completely
+        # unaffected by dependency_context -- every existing test's fake keeps working as-is.
+        output = _RunSqlLLMOutput(query="SELECT price FROM orders")
+        args = generate_tool_arguments(
+            run_sql_step,
+            catalog,
+            "orders",
+            dependency_context="some prior finding",
+            llm_call=_fake_llm_call(output),
+        )
+        assert args is not None
+        assert "orders" in args.query
+
 
 class TestLLMFailureHandling:
     def test_llm_call_exception_degrades_to_none_not_a_crash(self, catalog, run_sql_step):

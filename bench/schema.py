@@ -30,6 +30,63 @@ class QuestionCategory(StrEnum):
     UNANSWERABLE = "unanswerable"
 
 
+class EvaluationTier(StrEnum):
+    """A cross-cutting grouping of `QuestionCategory` by how many steps answering typically
+    takes, used to report evaluation metrics without inventing a second question taxonomy.
+
+    Not stored on `BenchmarkQuestion` -- derived from `category` via `_TIER_BY_CATEGORY`, so
+    the mapping lives in exactly one place and existing question JSON never needs to carry it.
+    """
+
+    DIRECT = "direct"
+    INVESTIGATION = "investigation"
+    REFUSAL = "refusal"
+
+
+#: The single source of truth for which categories belong to which evaluation tier.
+_TIER_BY_CATEGORY: dict[QuestionCategory, EvaluationTier] = {
+    QuestionCategory.DESCRIPTIVE: EvaluationTier.DIRECT,
+    QuestionCategory.SQL_AGGREGATION: EvaluationTier.DIRECT,
+    QuestionCategory.STATISTICAL_COMPARISON: EvaluationTier.DIRECT,
+    QuestionCategory.PREDICTIVE: EvaluationTier.DIRECT,
+    QuestionCategory.ROOT_CAUSE: EvaluationTier.INVESTIGATION,
+    QuestionCategory.UNANSWERABLE: EvaluationTier.REFUSAL,
+}
+
+
+class InvestigationExpectation(BaseModel):
+    """Investigation-specific evaluation rubric, set only on `root_cause` questions.
+
+    This is a rubric for a human reviewer (and for the deterministic checks
+    `bench/evaluation_report.py` can actually run), not a gold answer -- `expected_observation`
+    and `acceptable_conclusion_style` require an independent oracle to grade automatically,
+    which does not exist yet (see `bench/README.md`'s "Implemented vs. Planned"). Only
+    `forbidden_causal_phrases` is deterministically checkable today: a case-insensitive scan
+    of the final answer text, run by `bench/evaluation_report.py`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    expected_observation: str = Field(
+        ..., min_length=1, description="The anchor fact a correct investigation should find."
+    )
+    expected_analysis_dimensions: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Distinct candidate explanations a good plan should test (not tool names).",
+    )
+    acceptable_conclusion_style: str = Field(
+        ...,
+        min_length=1,
+        description="Rubric prose describing what a properly-hedged conclusion sounds like.",
+    )
+    forbidden_causal_phrases: list[str] = Field(
+        default_factory=list,
+        description="Phrases that must not appear in the final answer, checked verbatim "
+        "(case-insensitive) by bench/evaluation_report.py.",
+    )
+
+
 class BenchmarkQuestion(BaseModel):
     """One benchmark question: a natural-language prompt plus its expected shape of answer.
 
@@ -54,6 +111,15 @@ class BenchmarkQuestion(BaseModel):
     notes: str | None = Field(
         default=None, description="Why this question is answerable/unanswerable, if non-obvious."
     )
+    investigation: InvestigationExpectation | None = Field(
+        default=None,
+        description="Investigation rubric; only ever set on 'root_cause' questions.",
+    )
+
+    @property
+    def evaluation_tier(self) -> EvaluationTier:
+        """This question's cross-cutting evaluation tier, derived from `category`."""
+        return _TIER_BY_CATEGORY[self.category]
 
     @model_validator(mode="after")
     def _category_matches_answerable(self) -> Self:
@@ -62,6 +128,12 @@ class BenchmarkQuestion(BaseModel):
             raise ValueError("A question in the 'unanswerable' category cannot be answerable.")
         if not is_unanswerable_category and not self.answerable:
             raise ValueError("Only 'unanswerable'-category questions may be unanswerable.")
+        return self
+
+    @model_validator(mode="after")
+    def _investigation_only_on_root_cause(self) -> Self:
+        if self.investigation is not None and self.category != QuestionCategory.ROOT_CAUSE:
+            raise ValueError("`investigation` may only be set on 'root_cause' questions.")
         return self
 
 

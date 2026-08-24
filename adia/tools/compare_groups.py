@@ -5,6 +5,11 @@ group column — count, mean, median, and standard deviation per group, plus pai
 differences between groups. It performs no hypothesis testing (no p-values, no test
 selection, no effect sizes): that is out of scope for this phase and, if added later,
 belongs in its own typed contract rather than folded silently into this tool's output.
+
+A difference in group means is descriptive only — it says nothing about *why* the groups
+differ, the same reasoning `adia.tools.correlation` already applies to correlation
+coefficients. The output is descriptive only: `causal_claim_allowed` is always `False`, so
+`adia.validate.static.validate_answer` rejects causal language in any answer that cites it.
 """
 
 import itertools
@@ -64,10 +69,11 @@ def compare_groups(
     Returns:
         A `ToolResult`. On success, `data` holds `group_column`, `metric_column`,
         `group_count`, a `groups` list (one entry per group — `group`, `count`, `mean`,
-        `median`, `std` — ordered by group value ascending), and `pairwise_differences`
+        `median`, `std` — ordered by group value ascending), `pairwise_differences`
         (one entry per unordered group pair — `group_a`, `group_b`, `mean_difference` —
-        computed as `mean(group_b) - mean(group_a)`). On failure, `error` describes exactly
-        what was rejected or what went wrong.
+        computed as `mean(group_b) - mean(group_a)`), and `causal_claim_allowed: False` (a
+        difference in group means is not evidence of what caused it). On failure, `error`
+        describes exactly what was rejected or what went wrong.
     """
     started = time.perf_counter()
     args = {
@@ -159,6 +165,7 @@ def compare_groups(
         "group_count": len(groups),
         "groups": groups,
         "pairwise_differences": pairwise_differences,
+        "causal_claim_allowed": False,
     }
 
     evidence_id = generate_evidence_id(_TOOL_NAME, args)
