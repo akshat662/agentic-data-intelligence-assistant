@@ -1,0 +1,31 @@
+# Secrets -- never baked into the image; injected at container run time only.
+.env
+.env.*
+!.env.example
+
+# Frontend -- has its own image (web/Dockerfile) built from its own context.
+web/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Tests / benchmark / dev-only
+tests/
+bench/results/
+notebooks/
+docs/
+.git/
+.github/
+# Not README.md -- pyproject.toml's `readme = "README.md"` makes hatchling require it to be
+# present in the build context for `uv sync` to install the project itself.
+
+# Runtime data not meant to ship in the image (uploads happen after the container is running)
+data/uploads/

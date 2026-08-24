@@ -1,0 +1,9 @@
+# Secrets -- NEXT_PUBLIC_API_BASE_URL is passed as a build ARG (see Dockerfile), never read
+# from a copied .env file.
+.env*
+!.env.local.example
+
+node_modules
+.next
+.git
+*.md

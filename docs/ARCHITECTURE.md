@@ -236,7 +236,7 @@ question --> feasibility --> plan --> tool execution --> evidence store --> synt
    and dispatches each step to its tool — `profile_dataset` directly, everything else via
    `generate_tool_arguments` first. Every resulting `Evidence` record is written into the
    store, keyed by its content-addressed ID.
-5. **Evidence store**: `state.evidence` becomes `{evidence.id: evidence for evidence in store.list()}` —
+5. **Evidence store**: `state.evidence` becomes `{evidence.id: evidence for evidence in store.list_evidence()}` —
    a flat, ID-keyed map available to every later node.
 6. **Synthesis**: `synthesizer_node` renders every evidence record via
    `render_evidence_context` (`adia/evidence/renderer.py`) and passes that text, plus the
@@ -270,7 +270,7 @@ is never placed into the executed order — each becomes its own typed
 Because steps execute in topological order, a step's own dependencies have always already run
 — and already written their evidence to the store — by the time `execute_tools_node` reaches
 it. For any step with a non-empty `depends_on`, the node collects that evidence
-(`store.list(plan_step_id=dep_id)` for each dependency), renders it with the same
+(`store.list_evidence(plan_step_id=dep_id)` for each dependency), renders it with the same
 `render_evidence_context` the synthesizer uses, and passes the result as
 `generate_tool_arguments`'s `dependency_context` parameter. This is what lets a
 supporting-analysis step's SQL or column choice be grounded in what an earlier step actually

@@ -278,7 +278,7 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                 dependency_evidence = [
                     evidence
                     for dep_id in step.depends_on
-                    for evidence in store.list(plan_step_id=dep_id)
+                    for evidence in store.list_evidence(plan_step_id=dep_id)
                 ]
                 if dependency_evidence:
                     dependency_context = render_evidence_context(dependency_evidence)
@@ -337,7 +337,7 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
             new_errors.append(result.error)
 
     return {
-        "evidence": {evidence.id: evidence for evidence in store.list()},
+        "evidence": {evidence.id: evidence for evidence in store.list_evidence()},
         "errors": [*state.errors, *new_errors],
     }
 

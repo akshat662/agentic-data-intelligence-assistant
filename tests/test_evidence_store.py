@@ -87,19 +87,19 @@ class TestListAndSearch:
         store = EvidenceStore()
         store.add(_evidence(tool="run_sql", args={"q": 1}))
         store.add(_evidence(tool="profile_dataset", args={"q": 2}))
-        assert [e.tool for e in store.list(tool="profile_dataset")] == ["profile_dataset"]
+        assert [e.tool for e in store.list_evidence(tool="profile_dataset")] == ["profile_dataset"]
 
     def test_list_filters_by_plan_step(self):
         store = EvidenceStore()
         store.add(_evidence(args={"q": 1}, plan_step_id="step_1"))
         store.add(_evidence(args={"q": 2}, plan_step_id="step_2"))
-        assert [e.plan_step_id for e in store.list(plan_step_id="step_2")] == ["step_2"]
+        assert [e.plan_step_id for e in store.list_evidence(plan_step_id="step_2")] == ["step_2"]
 
     def test_list_all_returns_everything(self):
         store = EvidenceStore()
         store.add(_evidence(args={"q": 1}))
         store.add(_evidence(args={"q": 2}))
-        assert len(store.list()) == 2
+        assert len(store.list_evidence()) == 2
 
     def test_search_matches_tool_name(self):
         store = EvidenceStore()
@@ -128,7 +128,7 @@ class TestPersistence:
         reloaded = EvidenceStore()
         reloaded.load(path)
         assert len(reloaded) == 2
-        assert {e.id for e in reloaded.list()} == {e.id for e in store.list()}
+        assert {e.id for e in reloaded.list_evidence()} == {e.id for e in store.list_evidence()}
 
     def test_persist_path_autoloads_on_construction(self, tmp_path):
         path = tmp_path / "evidence.json"

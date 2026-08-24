@@ -249,7 +249,17 @@ adia/
     models/     # shared pydantic contracts used across every layer above
     data/       # dataset registry + loading (DuckDB/pandas)
     cli.py      # python -m adia — a thin interface, no business logic
-    api/, ui/   # placeholders for a future API/UI layer; not built in this phase
+    api/        # FastAPI backend (app.py, routes.py, service.py, schemas.py) — thin
+                #   interface over the same graph; see "Deployment" below
+    ui/         # reserved for a possible future in-repo UI; empty — superseded by web/
+
+web/            # Next.js frontend (App Router, TypeScript, Tailwind) — see "Deployment" below
+    app/            # page.tsx — the single-page chat demo
+    components/     # DatasetUpload, DatasetSelector, ChatWindow, ProgressTimeline,
+                     #   EvidencePanel, ValidationBadge
+    lib/            # api.ts (fetch wrappers), sse.ts (SSE stream parser),
+                     #   types.ts (hand-mirrors adia/api/schemas.py)
+    hooks/          # useChat.ts — the one useReducer driving a chat session
 
 bench/
     questions.json          # 25 questions: direct, investigation (root_cause), and refusal
@@ -277,3 +287,120 @@ uv run python -m bench.evaluation_report   # generate the tier-grouped evaluatio
 See [`bench/README.md`](bench/README.md) for the benchmark's own design philosophy and
 [`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind every major architectural
 choice made along the way.
+
+## Running the Full Stack Locally
+
+Two processes, in two terminals — the backend must be running before the frontend can answer
+anything:
+
+```bash
+# Terminal 1 — backend (FastAPI + the graph above), http://localhost:8000
+cp .env.example .env               # then fill in OPENAI_API_KEY
+uv sync
+uv run python -m adia.api
+
+# Terminal 2 — frontend (Next.js), http://localhost:3000
+cd web
+cp .env.local.example .env.local   # defaults already point at localhost:8000
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`, ask a question against the pre-registered `superstore` dataset,
+or upload your own CSV first.
+
+## Deployment
+
+```
+Browser
+  │  HTTPS
+  ▼
+Vercel  (Next.js — web/)              NEXT_PUBLIC_API_BASE_URL → the backend URL below
+  │  HTTPS — fetch + SSE (POST /chat/stream)
+  ▼
+Render  (FastAPI — adia/api)          OPENAI_API_KEY, ADIA_CORS_ORIGINS → the Vercel URL
+  │  HTTPS
+  ▼
+OpenAI API
+```
+
+No database, no queue, no auth layer, in production exactly as in development — this project's
+scope has deliberately never included them (see [`docs/DECISIONS.md`](docs/DECISIONS.md)). The
+shipped `superstore` dataset (`data/registry.json`, `data/superstore.csv`, `data/catalog/`) is
+tracked in git and deploys with the backend, so the demo always has a working dataset
+immediately after every deploy. **Known limitation, by design, not an oversight:** a CSV
+uploaded through `POST /datasets` is written to the backend's local filesystem
+(`data/uploads/`) — on most PaaS free/starter tiers that storage does not survive a restart or
+redeploy. Uploaded datasets are session-lived in production; the pre-registered `superstore`
+dataset is not affected.
+
+### Backend → Render (recommended)
+
+Render auto-detects this as a Python project from `pyproject.toml`/`uv.lock` — no Dockerfile
+needed for this path.
+
+1. New **Web Service**, point it at this repo.
+2. Build command: `pip install uv && uv sync --frozen --no-dev`
+3. Start command: `uv run python -m adia.api`
+4. Environment variables (Render dashboard → Environment):
+
+   | Variable | Required | Value |
+   |---|---|---|
+   | `OPENAI_API_KEY` | yes | your OpenAI key |
+   | `OPENAI_MODEL` | no | defaults to `gpt-4o-mini` |
+   | `ADIA_CORS_ORIGINS` | yes | your Vercel URL, e.g. `https://adia.vercel.app` |
+   | `PORT` | no | Render injects this itself; `adia/api/__main__.py` reads it automatically |
+
+Alternates with the same shape: Railway, Fly.io. Not recommended: Vercel serverless functions
+for this service — it needs a long-lived process that can hold an SSE connection open and run
+`pandas`/`duckdb`/`langgraph`, which doesn't fit a serverless function's execution model well.
+Free-tier caveat worth knowing: Render's free tier sleeps after inactivity, so the first request
+after idle has a cold-start delay — expected for a research/demo deployment, not a bug.
+
+### Frontend → Vercel (recommended)
+
+1. Import this repo into Vercel, set the project **root directory to `web/`**.
+2. Vercel auto-detects Next.js; no build command changes needed.
+3. Environment variable (Vercel dashboard → Settings → Environment Variables), **set before the
+   first build** — Next.js inlines `NEXT_PUBLIC_*` variables at build time, not at server start:
+
+   | Variable | Required | Value |
+   |---|---|---|
+   | `NEXT_PUBLIC_API_BASE_URL` | yes | your Render backend URL, e.g. `https://adia-api.onrender.com` |
+
+### Docker (optional, self-host fallback)
+
+Neither recommended host above needs this — it exists for portability to any other host or a
+self-managed VPS, and to let a reviewer run the exact production start command locally.
+
+```bash
+docker compose up --build
+```
+
+builds and runs both services together (`Dockerfile` for the backend, `web/Dockerfile` for the
+frontend), reading `OPENAI_API_KEY`/`OPENAI_MODEL` from a local `.env` at container **run**
+time — secrets are never copied into either image (see `.dockerignore`/`web/.dockerignore`).
+To build/run them independently:
+
+```bash
+docker build -t adia-backend .
+docker run -p 8000:8000 --env-file .env -e ADIA_CORS_ORIGINS=https://your-frontend-url adia-backend
+
+docker build -t adia-frontend web \
+  --build-arg NEXT_PUBLIC_API_BASE_URL=https://your-backend-url
+docker run -p 3000:3000 adia-frontend
+```
+
+### Environment variables — full reference
+
+| Variable | Where | Required | Default | Read by |
+|---|---|---|---|---|
+| `OPENAI_API_KEY` | backend | yes | — | `adia/agents/llm_config.py` |
+| `OPENAI_MODEL` | backend | no | `gpt-4o-mini` | `adia/agents/llm_config.py` |
+| `ADIA_CORS_ORIGINS` | backend | recommended in prod | `http://localhost:3000` | `adia/api/app.py` |
+| `PORT` / `ADIA_API_PORT` | backend | no | `8000` | `adia/api/__main__.py` |
+| `ADIA_API_HOST` | backend | no | `0.0.0.0` | `adia/api/__main__.py` |
+| `ADIA_API_RELOAD` | backend | no | `false` | `adia/api/__main__.py` (dev only) |
+| `NEXT_PUBLIC_API_BASE_URL` | frontend | yes in prod | `http://localhost:8000` | `web/lib/api.ts` (inlined at build time) |
+
+Templates: [`.env.example`](.env.example) (backend), [`web/.env.local.example`](web/.env.local.example) (frontend).

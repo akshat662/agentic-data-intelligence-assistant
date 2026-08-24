@@ -1,0 +1,29 @@
+# Local, "prod-like" full-stack run: `docker compose up --build`. Not a deployment target
+# itself -- see README.md "Deployment" for Render/Vercel, the recommended path.
+#
+# Secrets are injected at container *run* time only, via `env_file`/`environment` below --
+# never copied into either image (see Dockerfile / web/Dockerfile / .dockerignore).
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env # OPENAI_API_KEY / OPENAI_MODEL -- copy .env.example to .env first
+    environment:
+      ADIA_CORS_ORIGINS: http://localhost:3000
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # Inlined at build time (Next.js convention) -- the browser calls this URL directly,
+        # so it must be the backend's host-reachable address, not a container-network name.
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend

@@ -76,10 +76,18 @@ class EvidenceStore:
         """Look up an existing record for this exact tool and arguments, without recomputing."""
         return self._records.get(generate_evidence_id(tool_name, args))
 
-    def list(
+    def list_evidence(
         self, *, tool: str | None = None, plan_step_id: str | None = None
     ) -> list[Evidence]:
         """List stored evidence, optionally filtered by tool name and/or plan step.
+
+        Named `list_evidence`, not `list`: a method literally named `list` on this class
+        shadows the builtin `list` inside this class body's own namespace, which breaks the
+        `-> list[Evidence]` return annotation on any method defined afterwards (`search`,
+        below) under eager annotation evaluation -- the default on every currently-released
+        Python version except 3.14+ (which defers annotation evaluation per PEP 649). This
+        crashed on import under Python 3.12 in the deployment container even though it never
+        surfaced in this project's own Python 3.14 dev/test environment.
 
         Args:
             tool: If given, only return records produced by this tool.
