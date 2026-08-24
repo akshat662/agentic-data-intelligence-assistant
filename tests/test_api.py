@@ -3,11 +3,18 @@ made here -- `/chat` tests override `get_graph_runner` with a fake, exactly like
 `tests/test_cli.py` overrides `run_graph_fn`.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from adia.api.app import app
-from adia.api.service import get_graph_runner, get_registry_path, get_upload_dir
+from adia.api.service import (
+    get_graph_runner,
+    get_registry_path,
+    get_stream_graph_runner,
+    get_upload_dir,
+)
 from adia.evidence.ids import compute_args_hash, generate_evidence_id
 from adia.models.evidence import Evidence
 from adia.models.provenance import Provenance
@@ -47,6 +54,39 @@ def _fake_run_graph(final_answer, *, passed=True, evidence=None, feasible=True, 
         )
 
     return _run
+
+
+def _fake_stream_graph(steps):
+    """Build a `stream_graph_fn`-shaped fake from `[(node_name, partial_update), ...]`.
+
+    Mirrors `adia.graph.workflow.stream_graph`'s own contract: each partial is folded onto a
+    running copy of the initial state, and `(node_name, partial, state_so_far)` is yielded.
+    """
+
+    def _stream(initial_state: AgentState):
+        state = initial_state
+        for node_name, partial in steps:
+            state = state.model_copy(update=partial)
+            yield node_name, partial, state
+
+    return _stream
+
+
+def _fake_stream_graph_raising(exc: Exception):
+    """A `stream_graph_fn`-shaped fake that raises partway through -- never reaches the graph
+    or an LLM.
+    """
+
+    def _stream(initial_state: AgentState):
+        raise exc
+        yield  # pragma: no cover -- unreachable, makes this a generator function
+
+    return _stream
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """Parse a `text/event-stream` body of `data: <json>\\n\\n` frames into a list of dicts."""
+    return [json.loads(line[len("data: ") :]) for line in text.split("\n\n") if line.strip()]
 
 
 @pytest.fixture
@@ -140,6 +180,142 @@ class TestChat:
         assert response.status_code == 500
         assert response.json() == {"detail": "Internal server error."}
         assert "hunter2" not in response.text
+
+
+class TestChatStream:
+    def test_feasible_run_streams_phases_evidence_then_final(self, client):
+        ev = _make_evidence("profile_dataset", {"dataset_id": "superstore"})
+        steps = [
+            (
+                "feasibility",
+                {
+                    "catalog": None,
+                    "feasibility": FeasibilityResult(
+                        verdict=FeasibilityVerdict.FEASIBLE, reason="ok"
+                    ),
+                },
+            ),
+            ("planner", {"plan": []}),
+            ("execute_tools", {"evidence": {ev.id: ev}, "errors": []}),
+            ("synthesizer", {"draft_answer": "draft", "rendered_answer": "draft"}),
+            (
+                "validation",
+                {
+                    "validation": ValidationResult(passed=True),
+                    "final_answer": f"There are 9994 rows [[{ev.id}]].",
+                },
+            ),
+        ]
+        app.dependency_overrides[get_stream_graph_runner] = lambda: _fake_stream_graph(steps)
+
+        response = client.post(
+            "/chat/stream", json={"dataset_id": "superstore", "question": "How many rows?"}
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = _parse_sse(response.text)
+
+        types = [e["type"] for e in events]
+        assert types == ["phase", "phase", "phase", "evidence", "phase", "phase", "final"]
+
+        assert events[0] == {
+            "type": "phase",
+            "node": "feasibility",
+            "data": {"verdict": "feasible", "reason": "ok"},
+        }
+        assert events[2]["node"] == "execute_tools"
+        assert events[2]["data"] == {"evidence_count": 1, "error_count": 0}
+        assert events[3]["evidence"]["evidence_id"] == ev.id
+        assert events[3]["evidence"]["tool"] == "profile_dataset"
+        assert events[5]["data"] == {"passed": True}
+
+        final = events[-1]
+        assert final["dataset_id"] == "superstore"
+        assert final["question"] == "How many rows?"
+        assert "9994" in final["answer"]
+        assert final["validation_passed"] is True
+        assert final["tools_used"] == ["profile_dataset"]
+        assert final["refused"] is False
+        assert final["evidence"][0]["evidence_id"] == ev.id
+
+    def test_refusal_run_streams_refusal_phase_then_final(self, client):
+        steps = [
+            (
+                "feasibility",
+                {
+                    "catalog": None,
+                    "feasibility": FeasibilityResult(
+                        verdict=FeasibilityVerdict.INFEASIBLE, reason="no such column"
+                    ),
+                },
+            ),
+            (
+                "refusal",
+                {
+                    "draft_answer": "refused",
+                    "rendered_answer": "refused",
+                    "refusal": FeasibilityResult(
+                        verdict=FeasibilityVerdict.INFEASIBLE, reason="no such column"
+                    ),
+                },
+            ),
+            (
+                "validation",
+                {
+                    "validation": ValidationResult(passed=True),
+                    "final_answer": "This question cannot be answered.",
+                },
+            ),
+        ]
+        app.dependency_overrides[get_stream_graph_runner] = lambda: _fake_stream_graph(steps)
+
+        response = client.post(
+            "/chat/stream", json={"dataset_id": "superstore", "question": "What's the weather?"}
+        )
+        events = _parse_sse(response.text)
+
+        assert [e["type"] for e in events] == ["phase", "phase", "phase", "final"]
+        assert events[1]["node"] == "refusal"
+        assert events[1]["data"] == {"reason": "no such column"}
+        assert events[-1]["refused"] is True
+        assert events[-1]["feasibility_verdict"] == "infeasible"
+
+    def test_never_calls_the_real_graph_runner(self, client):
+        def _fail_if_called(initial_state):
+            raise AssertionError("the real streaming graph runner must never run in tests")
+            yield  # pragma: no cover -- unreachable, makes this a generator function
+
+        app.dependency_overrides[get_stream_graph_runner] = lambda: _fail_if_called
+        response = client.post(
+            "/chat/stream", json={"dataset_id": "superstore", "question": "How many rows?"}
+        )
+        events = _parse_sse(response.text)
+        assert events == [{"type": "error", "detail": "Internal server error."}]
+
+    def test_unexpected_failure_mid_stream_yields_error_event_not_a_broken_response(self, client):
+        app.dependency_overrides[get_stream_graph_runner] = lambda: _fake_stream_graph_raising(
+            RuntimeError("db password is hunter2")
+        )
+
+        response = client.post(
+            "/chat/stream", json={"dataset_id": "superstore", "question": "How many rows?"}
+        )
+
+        assert response.status_code == 200  # the stream itself starts fine; the error is a frame
+        events = _parse_sse(response.text)
+        assert events == [{"type": "error", "detail": "Internal server error."}]
+        assert "hunter2" not in response.text
+
+    def test_blank_question_is_rejected(self, client):
+        response = client.post("/chat/stream", json={"dataset_id": "superstore", "question": ""})
+        assert response.status_code == 422
+
+    def test_invalid_dataset_id_is_rejected(self, client):
+        response = client.post(
+            "/chat/stream", json={"dataset_id": "../etc/passwd", "question": "How many rows?"}
+        )
+        assert response.status_code == 422
 
 
 class TestDatasetUpload:

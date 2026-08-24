@@ -2,9 +2,11 @@
 service-level exceptions into HTTP responses -- no business logic lives here.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
 from .schemas import (
     DATASET_ID_PATTERN,
@@ -12,16 +14,20 @@ from .schemas import (
     ChatResponse,
     DatasetUploadResponse,
     HealthResponse,
+    StreamEvent,
 )
 from .service import (
     DatasetAlreadyRegisteredError,
     GraphRunner,
     InvalidCsvError,
+    StreamGraphRunner,
     get_graph_runner,
     get_registry_path,
+    get_stream_graph_runner,
     get_upload_dir,
     register_dataset,
     run_chat,
+    stream_chat,
 )
 
 router = APIRouter()
@@ -40,6 +46,27 @@ def chat(
 ) -> ChatResponse:
     """Run a question through the ADIA graph and return a structured result."""
     return run_chat(request.dataset_id, request.question, run_graph_fn=runner)
+
+
+@router.post("/chat/stream")
+def chat_stream(
+    request: ChatRequest,
+    runner: StreamGraphRunner = Depends(get_stream_graph_runner),
+) -> StreamingResponse:
+    """Run a question through the ADIA graph, streaming progress as Server-Sent Events.
+
+    Emits one `data: <json>\\n\\n` frame per event from `adia.api.service.stream_chat`
+    (`StreamPhaseEvent`, `StreamEvidenceEvent`, ..., ending in exactly one `StreamFinalEvent`
+    or `StreamErrorEvent`) -- see `adia/api/schemas.py` for the event shapes.
+    """
+    events = stream_chat(request.dataset_id, request.question, stream_graph_fn=runner)
+    return StreamingResponse(_as_sse(events), media_type="text/event-stream")
+
+
+def _as_sse(events: Iterator[StreamEvent]) -> Iterator[str]:
+    """Format typed stream events as `text/event-stream` frames -- wire format only, no logic."""
+    for event in events:
+        yield f"data: {event.model_dump_json()}\n\n"
 
 
 @router.post("/datasets", response_model=DatasetUploadResponse, status_code=201)
