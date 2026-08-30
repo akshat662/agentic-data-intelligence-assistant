@@ -34,6 +34,7 @@ from adia.tools.correlation import compute_correlation
 from adia.tools.ml_model import train_model
 from adia.tools.profile_dataset import profile_dataset
 from adia.tools.run_sql import run_sql
+from adia.tools.segment_contribution import segment_contribution
 from adia.validate.static import validate_answer
 
 #: `adia/graph/nodes.py` -> `adia/graph` -> `adia` -> repo root -> `data/registry.json`.
@@ -44,15 +45,16 @@ _REGISTRY_PATH = Path(__file__).resolve().parents[2] / "data" / "registry.json"
 #: `tool_family` values `execute_tools_node` currently knows how to run. Every other value in
 #: a plan step produces a typed error rather than being silently skipped — dispatching a tool
 #: with no way to fill in its arguments would mean guessing them, which is exactly the "no
-#: real agent reasoning" line this phase must not cross. `run_sql`, `compare_groups`, 
-#: `compute_correlation`, and `train_model` arguments come from `generate_tool_arguments` 
-#: (LLM proposes, Python validates); `profile_dataset` runs directly.
+#: real agent reasoning" line this phase must not cross. `run_sql`, `compare_groups`,
+#: `compute_correlation`, `train_model`, and `segment_contribution` arguments come from
+#: `generate_tool_arguments` (LLM proposes, Python validates); `profile_dataset` runs directly.
 _SUPPORTED_TOOL_FAMILIES = frozenset({
-    "profile_dataset", 
-    "run_sql", 
-    "compare_groups", 
-    "compute_correlation", 
-    "train_model"
+    "profile_dataset",
+    "run_sql",
+    "compare_groups",
+    "compute_correlation",
+    "train_model",
+    "segment_contribution",
 })
 
 #: Returned as `final_answer` when `validation_node` rejects the synthesized answer. A fixed,
@@ -330,6 +332,17 @@ def execute_tools_node(state: AgentState) -> dict[str, Any]:
                     args.task_type,
                     args.model_type,
                     store,
+                    plan_step_id=step.id,
+                )
+            elif step.tool_family == "segment_contribution":
+                result = segment_contribution(
+                    args.dataset_id,
+                    args.source_path,
+                    args.entity_column,
+                    args.metric_column,
+                    store,
+                    parent_column=args.parent_column,
+                    parent_value=args.parent_value,
                     plan_step_id=step.id,
                 )
 

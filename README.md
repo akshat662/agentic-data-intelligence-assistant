@@ -85,65 +85,83 @@ to compute and *how to say it*; it never *is* the computation.
 
 ## Investigation Capability
 
-**Question:** *"Why does the Office Supplies category have the lowest total Sales among the
-three categories?"*
+**Question:** *"Why does Technology have the highest total Sales among the three categories?"*
+(`bench` question q026 — the question written specifically to exercise `segment_contribution`,
+the decomposition tool added in Phase 7.)
 
-This is a real, current run of the system (`bench` question q023) — not a mocked example.
+This is a real run of the system — not a mocked example. The Planner produced a 5-step plan:
 
-**1. Observation step** — the Planner's first step, no dependencies:
-> Determine total Sales for each Category, to confirm which one is lowest.
-> → `run_sql` → **Office Supplies: $719,047.03**, Furniture: $741,999.80, Technology: $836,154.03
+**1. Decompose the total by Sub-Category** (`segment_contribution`, no dependencies) — instead
+of just re-stating that Technology's total is largest, break down *what inside Technology*
+makes up that total:
+> `segment_contribution(entity_column="Sub-Category", metric_column="Sales", parent_column="Category", parent_value="Technology")`
+> → **Phones: 39.5% of Technology's Sales** (rank 1), Machines: 22.6% (rank 2), Accessories:
+> 20.0% (rank 3), Copiers: 17.9% (rank 4)
 
-**2–4. Supporting analysis steps** — each `depends_on` the observation step, each testing a
-distinct candidate explanation, each receiving the observation's actual evidence as context so
-its query can be grounded in that finding rather than guessing:
-> → `compare_groups` on Quantity per transaction, by Category
-> → `compare_groups` on Discount, by Category
-> → `compare_groups` on Profit per transaction, by Category
+**2–4. Supporting comparisons across all three categories** (`compare_groups`, each testing a
+distinct candidate explanation): average Sales per order, average Discount, average Profit
+margin — checking whether Technology simply sells at a higher price point, discounts less, or
+is more profitable per order.
 
-**5. Evidence collection** — every one of those four tool calls wrote a citable evidence
-record (`ev_run_sql_f841acff`, `ev_compare_groups_9e113910`, `ev_compare_groups_a0b329cb`,
-`ev_compare_groups_55005d39`); the Synthesizer sees only these, never the raw data.
+**5. Decompose the total by Region** (`segment_contribution` again, `depends_on` step 1 — this
+step's arguments were grounded in step 1's actual finding, not guessed at):
+> `segment_contribution(entity_column="Region", metric_column="Sales", parent_column="Category", parent_value="Technology")`
+> → East: 31.7% (rank 1), West: 30.1% (rank 2), Central: 20.4% (rank 3), South: 17.8% (rank 4)
 
-**6. Grounded final answer** (the system's actual output for this question):
+**Evidence collection** — all five tool calls wrote a citable evidence record; the Synthesizer
+sees only these bounded, rendered summaries, never the raw tool output.
 
-> The Office Supplies category has the lowest total Sales among the three categories, with
-> total sales of 719,047.03, compared to Furniture with 741,999.80 and Technology with
-> 836,154.03 [[ev_run_sql_f841acff]]. The quantity sold per transaction is similar across
-> categories, with Office Supplies having a mean quantity of 3.80, Furniture 3.79, and
-> Technology 3.76 [[ev_compare_groups_9e113910]]. The average discount for Office Supplies is
-> 0.157, which is slightly lower than Furniture's 0.174 but higher than Technology's 0.132
-> [[ev_compare_groups_a0b329cb]]. The mean profit per transaction for Office Supplies is
-> 20.33, which is higher than Furniture's 8.70 but much lower than Technology's 78.75
-> [[ev_compare_groups_55005d39]]. These data suggest that despite similar quantities sold and
-> moderate discounts, the Office Supplies category generates lower total sales than Technology
-> and Furniture, but **the evidence does not provide a specific reason why** Office Supplies
-> has the lowest total sales.
+**Grounded final answer** (the system's actual output for this question):
 
-Notice what the answer does *not* do: it never claims order volume, discount, or profit
-*caused* the sales gap. Every `compare_groups` result is marked `causal_claim_allowed: False`
-at the tool level, and `adia/validate/static.py` rejects causal language backed by evidence
-that says it can't support it — this is enforced, not merely requested by a prompt.
+> Technology has the highest total Sales among the three categories because it has the highest
+> mean Sales per transaction at 452.71, compared to Furniture's 349.83 and Office Supplies'
+> 119.32 [[ev_compare_groups_53408918]]. Additionally, within Technology, certain sub-categories
+> like Machines have very high average sales per transaction (mean of 1645.55) despite a
+> smaller count, contributing significantly to total sales [[ev_segment_contribution_6438c4b5]].
+> Technology also has relatively lower average discounts (mean discount 0.13) compared to
+> Furniture and Office Supplies, which may be associated with higher sales values
+> [[ev_compare_groups_a0b329cb]]. However, **the evidence does not explicitly explain why**
+> Technology's sales are higher, only that it is associated with higher average sales per
+> transaction and sub-category contributions.
+
+Notice what the answer does *not* do: it never claims discount, sub-category mix, or region
+*caused* the sales gap — "associated with," not "because of." Every `compare_groups` and
+`segment_contribution` result is marked `causal_claim_allowed: False` at the tool level, and
+`adia/validate/static.py` rejects causal language backed by evidence that says it can't support
+it — this is enforced, not merely requested by a prompt. It's enforced often enough to matter
+in practice: on a separate real run of this exact question, the Synthesizer proposed a
+draft using *"...leads to a total sales of..."*, citing a `segment_contribution` record — the
+validator rejected it and the system fell back to a safe, citation-only answer instead of
+shipping the causal claim. Both outcomes are real; see
+[`docs/INTERVIEW.md`](docs/INTERVIEW.md) for the full account of that run.
 
 ## Evaluation Results
 
-From the most recent full benchmark run (`bench/results/evaluation_report.json`, 25 questions,
-real LLM calls throughout):
+From the most recent full benchmark run (`bench/results/evaluation_report.json`, 26 questions
+— 25 original plus `q026`, the `segment_contribution` question — real LLM calls throughout):
 
-| Tier | Questions | Avg Plan Steps | Validation Pass Rate |
-|---|---|---|---|
-| **Direct** (lookup/aggregation/comparison/prediction) | 16 | **1.00** | 100% |
-| **Investigation** ("why" questions) | 4 | **5.00** | 100% |
-| **Refusal** (unanswerable) | 5 | 0.00 (never reaches the planner) | 100% |
+| Tier | Questions | Avg Plan Steps | Avg Evidence Coverage | Validation Pass Rate |
+|---|---|---|---|---|
+| **Direct** (lookup/aggregation/comparison/prediction) | 16 | **1.44** | 100.0% | 100% |
+| **Investigation** ("why" questions) | 5 | **5.00** | 92.0% | 100% |
+| **Refusal** (unanswerable) | 5 | 0.00 (never reaches the planner) | N/A | 100% |
 
-- **Direct questions average exactly 1 plan step; investigation questions average 5** — a
-  measured, 5x structural difference between a lookup and an investigation, not a claim made
-  in prose.
+- **Investigation questions average 5 plan steps versus 1.44 for direct ones** — a measured
+  structural difference between a lookup and an investigation, not a claim made in prose.
+  (Direct's average ticked up from a flat 1.00 in the pre-Phase-7 run: the Planner now
+  sometimes reaches for `segment_contribution`'s ranked-share view even on a single-lookup
+  question rather than a plain aggregation — still one validated, correct answer, just
+  occasionally a more elaborate path to it.)
+- **Evidence coverage**: 100% for direct questions; 92.0% for investigation questions — one
+  investigation question's plan included two steps that failed to execute (recorded as typed
+  errors, not silent gaps) and still produced a validated answer from the steps that did.
 - **Refusal correctness**: 5/5 unanswerable questions correctly refused (100% refusal recall);
-  0/20 answerable questions wrongly refused (0% false-refusal rate).
+  0/21 answerable questions wrongly refused (0% false-refusal rate).
 - **Forbidden causal-phrase scan**: zero violations found across all investigation-tier
-  answers — no answer in this run claimed causation ("causes", "led to", "due to", ...) from
-  evidence that can't support it.
+  *final* answers — no shipped answer in this run claimed causation ("causes", "led to", "due
+  to", ...) from evidence that can't support it. (A causal-language *draft* was rejected and
+  replaced mid-run at least once during this project's own development — see
+  [`docs/INTERVIEW.md`](docs/INTERVIEW.md) — which is exactly why this scan exists.)
 - **Validation success**: 100% of answers across every tier passed the static grounding
   validator — every reported number traces to a real, cited tool result.
 
@@ -172,48 +190,54 @@ uv run python -m adia
 ```
 
 The CLI is a thin prompt over the same graph the benchmark runs — no separate demo path, no
-mocked responses.
+mocked responses. The Next.js frontend (`web/`, see "Deployment" below) drives the identical
+graph over HTTP/SSE instead of a terminal — same plans, same tools, same grounding.
 
-### Example 1 — Direct analytical question
+### Demo Walkthrough
+
+Three representative runs, real CLI transcripts, chosen to show the range from a trivial
+lookup to a full multi-step investigation.
+
+**1. Direct Question** — one tool, no planning overhead needed:
 
 ```
-Dataset:
-superstore
-
-Question:
-> What is the total Sales revenue for each product Category?
-
-Answer:
-The total sales revenue for each product category is as follows: Furniture has total sales
-of 741999.7952999998, Technology has total sales of 836154.0329999966, and Office Supplies
-has total sales of 719047.0320000029 [[ev_run_sql_44bd03d2]].
-
+Question: > How many rows are in the dataset?
+Answer: The dataset contains 9994 rows [[ev_profile_dataset_f9ac9ba2]].
 Validation: PASSED
-Evidence used: ev_run_sql_44bd03d2
 ```
 
-### Example 2 — Investigation question
+`profile_dataset` alone; the graph doesn't over-plan a question that needs one number.
+
+**2. Analytical Question** — SQL aggregation:
 
 ```
-Dataset:
-superstore
-
-Question:
-> Why does the Office Supplies category have the lowest total Sales among the three categories?
-
-Answer:
-The Office Supplies category has the lowest total Sales among the three categories, with
-total sales of 719,047.03, compared to Furniture with 741,999.80 and Technology with
-836,154.03 [[ev_run_sql_f841acff]]. ... These data suggest that despite similar quantities
-sold and moderate discounts, the Office Supplies category generates lower total sales than
-Technology and Furniture, but the evidence does not provide a specific reason why Office
-Supplies has the lowest total sales.
-
+Question: > What is the total Sales revenue for each product Category?
+Answer: The total sales revenue for each product category is as follows: Furniture has total
+sales of 741999.7953, Technology has total sales of 836154.0330, and Office Supplies has
+total sales of 719047.0320 [[ev_run_sql_44bd03d2]].
 Validation: PASSED
-Evidence used: ev_compare_groups_55005d39, ev_compare_groups_9e113910, ev_compare_groups_a0b329cb, ev_run_sql_f841acff
 ```
 
-### Example 3 — Unsupported question (refusal)
+One guarded `run_sql` aggregation — the same mechanism, not a special case, that the
+investigation example below builds on for its supporting comparisons.
+
+**3. Investigation Question (the main demo)** — *"Why does Technology have the highest total
+Sales among the three categories?"* See ["Investigation Capability"](#investigation-capability)
+above for the full walkthrough: a 5-step plan, `segment_contribution` decomposing Technology's
+Sales by Sub-Category and then by Region (the second decomposition `depends_on` and is grounded
+in the first), 5 evidence records, one validated, hedged, non-causal answer.
+
+### Screenshots
+
+| | |
+|---|---|
+| **Chat interface** ![Chat interface](docs/screenshots/01-chat-interface.png) | **Streaming progress timeline** ![Progress timeline](docs/screenshots/02-progress-timeline.png) |
+| **Evidence panel** ![Evidence panel](docs/screenshots/03-evidence-panel.png) | **Final validated answer** ![Final answer](docs/screenshots/04-final-answer.png) |
+
+**Investigation example** (the Technology question above, running live in the frontend):
+![Investigation example](docs/screenshots/05-investigation-example.png)
+
+### Bonus — Unsupported question (refusal)
 
 ```
 Dataset:
@@ -243,7 +267,8 @@ adia/
         argument_generator.py   # propose validated tool arguments per plan step
         synthesizer.py          # write a citation-bearing answer from collected evidence
     graph/      # the LangGraph workflow: routing, dependency-ordered step execution
-    tools/      # deterministic computation — SQL, comparisons, correlation, ML — no LLM here
+    tools/      # deterministic computation — SQL, comparisons, correlation, ML, contribution
+                #   decomposition (segment_contribution) — no LLM here
     evidence/   # the store + renderer: every tool result becomes a citable, provenance-tracked record
     validate/   # the static grounding validator — the one gate every final answer must pass
     models/     # shared pydantic contracts used across every layer above
@@ -269,7 +294,8 @@ bench/
     results/                 # generated output (gitignored): results.json, evaluation_report.{md,json}
 
 tests/          # one test file per adia/ and bench/ module — no real LLM calls in any test
-docs/           # DECISIONS.md (architecture decision log), ARCHITECTURE.md
+docs/           # DECISIONS.md (architecture decision log), ARCHITECTURE.md, INTERVIEW.md,
+                #   screenshots/ (see "Demo Walkthrough" above)
 data/           # the registered superstore dataset + its generated catalog
 ```
 
@@ -284,9 +310,12 @@ uv run python -m bench.runner              # run the full benchmark against the 
 uv run python -m bench.evaluation_report   # generate the tier-grouped evaluation report
 ```
 
-See [`bench/README.md`](bench/README.md) for the benchmark's own design philosophy and
+See [`bench/README.md`](bench/README.md) for the benchmark's own design philosophy,
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full technical reference,
 [`docs/DECISIONS.md`](docs/DECISIONS.md) for the reasoning behind every major architectural
-choice made along the way.
+choice made along the way, and [`docs/INTERVIEW.md`](docs/INTERVIEW.md) for a conversational
+walkthrough of the "why" behind the architecture, with a real example of the validation layer
+catching an unsupported claim.
 
 ## Running the Full Stack Locally
 

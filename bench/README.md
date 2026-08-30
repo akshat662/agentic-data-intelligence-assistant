@@ -34,7 +34,7 @@ Every question belongs to exactly one of six `QuestionCategory` values (`bench/s
 | `descriptive` | Can the system describe the dataset itself — shape, columns, types? | `profile_dataset` |
 | `sql_aggregation` | Can it answer a question that requires filtering/grouping/aggregating rows? | `run_sql` |
 | `statistical_comparison` | Can it compare a metric across groups correctly? | `compare_groups` |
-| `root_cause` | Can it *investigate* why a metric is what it is — not just state it? | `run_sql`, `compare_groups` |
+| `root_cause` | Can it *investigate* why a metric is what it is — not just state it? | `run_sql`, `compare_groups`, `segment_contribution` |
 | `predictive` | Can it fit a model and honestly report how much better than a naive baseline it is? | `train_model` |
 | `unanswerable` | Does it decline instead of guessing, when the data can't support an answer? | *(none — refusal is correct)* |
 
@@ -108,8 +108,8 @@ phrases verbatim (case-insensitive), independent of and in addition to
 
 **Implemented:**
 - `bench/schema.py` — question contract, evaluation tiers, investigation metadata.
-- `bench/questions.json` — 25 questions: 1 `descriptive`, 5 `sql_aggregation`, 5
-  `statistical_comparison`, 5 `predictive`, 4 `root_cause` (with investigation metadata), 5
+- `bench/questions.json` — 26 questions: 1 `descriptive`, 5 `sql_aggregation`, 5
+  `statistical_comparison`, 5 `predictive`, 5 `root_cause` (with investigation metadata), 5
   `unanswerable`.
 - `bench/runner.py` — drives the real graph end-to-end; records feasibility verdict, tools
   used, plan/execution/evidence counts, validation outcome, and the final answer.
@@ -127,6 +127,10 @@ phrases verbatim (case-insensitive), independent of and in addition to
   rubric for a human reviewer, deliberately not auto-scored (see `docs/DECISIONS.md`'s entry
   on why no LLM-based evaluator was introduced for this).
 - The 3-arm ablation comparison (grounding on vs. off) and a `EVAL.md`-style narrative report.
-- A `segment_contribution`-style decomposition tool — `root_cause` questions are answerable
-  today only via aggregation-plus-comparison investigation, not a full volume-vs-rate
-  decomposition.
+
+**Phase 7 addition:** `adia/tools/segment_contribution.py` — ranks how much each sub-group of
+a category contributes to a metric's total (row count, summed/mean metric, share of the
+in-scope total, ranked), optionally scoped to one parent value (e.g. break Sales down by
+Sub-Category within `Category == "Technology"`). Wired through the same
+planner/argument-generator/`execute_tools_node` allowlist every other tool uses — no new agent,
+no graph change. `q026` is the first question written specifically to exercise it.

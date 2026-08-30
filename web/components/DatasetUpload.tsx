@@ -40,7 +40,7 @@ export function DatasetUpload({ onUploaded }: DatasetUploadProps) {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex flex-col gap-2.5">
+    <form onSubmit={handleSubmit} className="flex min-w-0 flex-1 flex-col gap-2.5">
       <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
         Upload a CSV dataset
       </span>
@@ -50,7 +50,7 @@ export function DatasetUpload({ onUploaded }: DatasetUploadProps) {
         placeholder="dataset id (letters, numbers, -, _)"
         value={datasetId}
         onChange={(event) => setDatasetId(event.target.value)}
-        className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
+        className="w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
         aria-label="Dataset id"
       />
       {datasetId.length > 0 && !datasetIdValid && (
@@ -64,7 +64,7 @@ export function DatasetUpload({ onUploaded }: DatasetUploadProps) {
         placeholder="short description"
         value={description}
         onChange={(event) => setDescription(event.target.value)}
-        className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
+        className="w-full min-w-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
         aria-label="Dataset description"
       />
 

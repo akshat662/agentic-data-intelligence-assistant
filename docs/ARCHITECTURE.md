@@ -24,11 +24,47 @@ This discipline is enforced structurally, not by convention:
   (`adia/validate/static.py`).
 
 The system is driven by a LangGraph state machine (`adia/graph/workflow.py`) over a single
-shared, typed state object (`adia.models.state.AgentState`), and is reachable through one thin
-interface, `adia/cli.py` (`python -m adia`). `bench/runner.py` drives the same graph over a
-fixed question set for evaluation; both callers use the identical
-`create_initial_state` → `run_graph` path, so nothing about how the system answers a question
-differs between an interactive session and a benchmark run.
+shared, typed state object (`adia.models.state.AgentState`), and is reachable through three
+thin interfaces that all drive the identical `create_initial_state` → `run_graph` (or
+`stream_graph`) path: `adia/cli.py` (`python -m adia`), the FastAPI backend (`adia/api/`), and
+`bench/runner.py` for evaluation. Nothing about how the system answers a question differs
+between an interactive session, a browser, and a benchmark run — none of them contain
+feasibility, planning, tool-dispatch, or validation logic of their own.
+
+### Full-Stack Topology
+
+The graph above is the same regardless of caller; this is what sits in front of it when the
+caller is a browser rather than a terminal:
+
+```
+        User
+         │
+         ▼
+   Frontend (web/ -- Next.js, TypeScript, Tailwind)
+         │  fetch + SSE: POST /chat, POST /chat/stream, POST /datasets
+         ▼
+   FastAPI (adia/api/ -- app.py, routes.py, service.py, schemas.py)
+         │  create_initial_state() -> run_graph() / stream_graph()
+         ▼
+   LangGraph (adia/graph/)
+         │
+  ┌──────┴──────────────────────────────────────┐
+  │  Feasibility -> Planner -> Argument Generator │
+  │       -> Tool Executor -> Synthesizer          │
+  │            -> Validator                        │
+  └──────┬──────────────────────────────────────┘
+         │  every tool call
+         ▼
+   Evidence Store (adia/evidence/)
+```
+
+`adia/api/` is a thin interface layer only, by the same discipline as `adia/cli.py`: it has no
+feasibility, planning, tool-dispatch, or validation logic of its own (§9 has the full endpoint
+list and the SSE event contract). "Argument Generator" and "Tool Executor" are not separate
+LangGraph nodes — they're `generate_tool_arguments` and the tool-dispatch half of
+`execute_tools_node` respectively (§3's six real node names are the ones that matter for the
+graph itself); they're broken out here because they're the two places tool-specific reasoning
+and execution actually happen, which the six-node diagram in §3 doesn't distinguish.
 
 ## 2. Component Architecture
 
@@ -44,7 +80,8 @@ adia/
         workflow.py               # build_graph(), route_after_feasibility(), run_graph()
         state.py                  # create_initial_state(), finalize_state()
     tools/        # deterministic computation -- no LLM call anywhere in this package
-        profile_dataset.py, run_sql.py, compare_groups.py, correlation.py, ml_model.py
+        profile_dataset.py, run_sql.py, compare_groups.py, correlation.py, ml_model.py,
+        segment_contribution.py
         sql_guard.py             # parses and guards SQL before execution
         duckdb_client.py         # in-memory DuckDB connection over a registered DataFrame
     evidence/
@@ -60,6 +97,11 @@ adia/
         catalog.py (DatasetCatalog/ColumnProfile), state.py (AgentState and friends)
     data/          # dataset registry + loading
     cli.py         # python -m adia -- a thin interface, no business logic
+    api/           # FastAPI backend -- app.py, routes.py, service.py, schemas.py
+                   # (POST /chat, POST /chat/stream, POST /datasets, GET /health)
+
+web/              # Next.js frontend (App Router, TypeScript, Tailwind)
+    app/, components/, lib/, hooks/    # see README.md "Project Structure" for the full layout
 
 bench/
     schema.py, questions.json, runner.py, evaluation_report.py
@@ -133,8 +175,9 @@ answer's confidence, not a reason to refuse the question.
 `create_plan(question, catalog, feasibility)` is only called when
 `feasibility.verdict == FEASIBLE` — for anything else it returns an empty plan without
 invoking the LLM at all. It asks for a list of steps, each with a `step_id`, a `tool_family`
-(one of `profile_dataset`, `run_sql`, `compare_groups`, `compute_correlation`, `train_model`),
-a one-sentence purpose, and `depends_on` (other step IDs in the same plan that must run
+(one of `profile_dataset`, `run_sql`, `compare_groups`, `compute_correlation`, `train_model`,
+`segment_contribution`), a one-sentence purpose, and `depends_on` (other step IDs in the same
+plan that must run
 first). It never proposes tool arguments, SQL text, or column selections — only plan shape.
 Python validates every proposed step before any `PlanStep` is built: an unsupported
 `tool_family`, a dependency on a step ID absent from the same plan, or a duplicate `step_id`
@@ -148,15 +191,18 @@ each `depends_on` the observation step and each test one distinct candidate expl
 ### Argument Generator (`adia/agents/argument_generator.py`)
 
 `generate_tool_arguments(step, catalog, dataset_id, *, dependency_context="", llm_call=None)`
-fills in the concrete arguments a plan step's tool needs. It supports the four tool families
+fills in the concrete arguments a plan step's tool needs. It supports the five tool families
 that take LLM-proposed arguments (`profile_dataset` needs none and is dispatched directly by
 the graph, bypassing this agent entirely). Each tool family has its own private, unvalidated
 LLM output schema (`_RunSqlLLMOutput`, `_CompareGroupsLLMOutput`, `_ComputeCorrelationLLMOutput`,
-`_TrainModelLLMOutput`); Python then converts it into the tool's own real argument type
-(`RunSqlArgs`, `CompareGroupsArgs`, `ComputeCorrelationArgs`, `TrainModelArgs`), rejecting
-anything that doesn't check out: a blank SQL query, a `group_column`/`metric_column`/
-`target_column`/`feature_column` not present in the catalog, or (for `run_sql`) a query that
-fails `adia.tools.sql_guard.check_sql` — the same guard the `run_sql` tool itself applies. Any
+`_TrainModelLLMOutput`, `_SegmentContributionLLMOutput`); Python then converts it into the
+tool's own real argument type (`RunSqlArgs`, `CompareGroupsArgs`, `ComputeCorrelationArgs`,
+`TrainModelArgs`, `SegmentContributionArgs`), rejecting anything that doesn't check out: a
+blank SQL query, a `group_column`/`metric_column`/`target_column`/`feature_column`/
+`entity_column`/`parent_column` not present in the catalog, a `parent_column` given without a
+matching `parent_value` (or vice versa — `SegmentContributionArgs`'s own validator rejects
+this), or (for `run_sql`) a query that fails `adia.tools.sql_guard.check_sql` — the same guard
+the `run_sql` tool itself applies. Any
 rejection or LLM failure returns `None`; the caller (`execute_tools_node`) turns that into a
 typed `ToolError`, never a guessed argument. `dependency_context` — rendered evidence from a
 step's own dependencies, built by the caller via `render_evidence_context` — is threaded only
@@ -184,7 +230,7 @@ unsupported, stated explicitly rather than implied.
 
 ## 5. Tool Execution Layer
 
-Five deterministic tools, each a plain function taking validated arguments plus an
+Six deterministic tools, each a plain function taking validated arguments plus an
 `EvidenceStore`, returning a `ToolResult` (`adia.models.tool_result`) — never raising into its
 caller. `ToolResult.ok` selects between two mutually exclusive shapes, enforced by the model's
 own validator: `data`/`evidence_id`/`provenance` when `True`, `error: ToolError` when `False`.
@@ -196,6 +242,7 @@ own validator: `data`/`evidence_id`/`provenance` when `True`, `error: ToolError`
 | `compare_groups` | Per-group count/mean/median/std plus pairwise mean differences | `groups`, `pairwise_differences`, `causal_claim_allowed: False` |
 | `compute_correlation` | Pairwise Pearson correlation between numeric columns | `matrix`, `pairs`, `causal_claim_allowed: False` |
 | `train_model` | One fixed-hyperparameter scikit-learn model vs. a naive baseline on a held-out split | `metric_value`, `baseline_metric_value`, `feature_importance` |
+| `segment_contribution` | Ranks each entity's count/total/mean/share of a metric's total, optionally scoped to one parent value (e.g. Sub-Category within `Category == "Technology"`) | `entities` (`rank`, `total`, `share_of_total`, ...), `overall_total`, `causal_claim_allowed: False` |
 
 `run_sql` is the only tool that accepts free-form input; every query passes through
 `adia.tools.sql_guard.check_sql` first, which parses it with `sqlglot`, rejects anything that
@@ -319,10 +366,11 @@ populate `final_answer`.
 
 ### Unsupported Causal Claim Handling
 
-Two tools mark their own output as unable to support a causal claim by setting
+Three tools mark their own output as unable to support a causal claim by setting
 `causal_claim_allowed: False` in the `Evidence.data` they write: `compute_correlation`
-(a correlation coefficient is not evidence of cause) and `compare_groups` (a difference in
-group means is not evidence of what caused it). `validate_answer`'s causal-language check
+(a correlation coefficient is not evidence of cause), `compare_groups` (a difference in
+group means is not evidence of what caused it), and `segment_contribution` (a share of a
+total says nothing about why that segment is larger). `validate_answer`'s causal-language check
 reads this flag directly off whatever evidence a given answer actually cites — it fires only
 when the answer both uses causal language *and* cites a record that opted out, so a tool that
 simply says nothing about causality (e.g. `run_sql`) is not treated as forbidding it, since
@@ -331,3 +379,47 @@ causes" framing in the Synthesizer's prompt (§4) an enforced property of the fi
 only a request made of the LLM: an answer that ignores the prompt and claims causation from a
 `compare_groups` or `compute_correlation` result fails validation and is replaced by the fixed
 fallback answer, the same as any other ungrounded claim.
+
+## 9. API and Frontend Layer
+
+`adia/api/` is a thin FastAPI interface over the exact same graph, following the same
+"no business logic in the interface" discipline as `adia/cli.py`: `routes.py` only validates
+input and translates exceptions to HTTP responses, `service.py` calls
+`create_initial_state`/`run_graph`/`stream_graph` and shapes the result, `schemas.py` holds
+request/response contracts.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness check |
+| `POST /chat` | Run one question through the graph; returns the full result as one JSON response |
+| `POST /chat/stream` | Same, but as Server-Sent Events — see below |
+| `POST /datasets` | Upload a CSV, register it (`adia/data/registry.py`), available to future `/chat` calls immediately |
+
+`POST /chat/stream` streams one `data: <json>\n\n` frame per event as the graph runs, each
+being exactly one of:
+- `{"type":"phase", "node": ..., "data": {...}}` — one per completed graph node, `data` a
+  small curated summary (never a raw state dump).
+- `{"type":"evidence", "evidence": {...}}` — one per new evidence record, carrying the same
+  bounded `RenderedEvidence` (`adia/evidence/renderer.py`) the Synthesizer itself sees, never
+  raw tool output.
+- `{"type":"final", "answer": ..., "evidence": [...], "validation_passed": ..., ...}` — exactly
+  once, last, on success.
+- `{"type":"error", "detail": "Internal server error."}` — instead of `final`, on failure; the
+  HTTP response itself is still 200 (the stream started fine), so a client must check event
+  `type`, not just response status.
+
+**Token-level streaming of the answer text is deliberately not implemented.** The Synthesizer
+can silently discard its own LLM draft and substitute the mechanical fallback if grounding
+validation fails (§4, §8) — streaming raw tokens to the browser as they're generated would
+mean sometimes showing text that gets retracted a moment later, undermining the one guarantee
+this system exists to make. The stream instead narrates *progress* (which node just completed,
+which evidence was just produced) live, and delivers the final answer as a single,
+already-validated chunk once `validation` completes.
+
+`web/` (Next.js, App Router, TypeScript, Tailwind) is a thin client of this API: `lib/api.ts`
+wraps the two calls above, `lib/sse.ts` parses the streamed frames, `hooks/useChat.ts` holds
+the running transcript in a `useReducer` (no server-side session — every `/chat/stream` call
+is an independent, stateless graph run; the frontend's "chat session" is a client-side-only
+list of past turns, not real conversational memory fed back into the LLM). See the root
+[`README.md`](../README.md)'s "Project Structure" and "Deployment" sections for the full
+component list and how to run or deploy both halves.

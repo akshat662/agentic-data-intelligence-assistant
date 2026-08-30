@@ -271,6 +271,39 @@ class TestExecuteToolsNode:
         assert len(update["errors"]) == 1
         assert update["errors"][0].kind == ToolErrorKind.VALIDATION
 
+    def test_runs_segment_contribution_step_with_mocked_argument_generator(
+        self, superstore_catalog, monkeypatch
+    ):
+        from adia.tools.segment_contribution import SegmentContributionArgs
+
+        monkeypatch.setattr(
+            "adia.graph.nodes.generate_tool_arguments",
+            lambda *a, **k: SegmentContributionArgs(
+                dataset_id="superstore",
+                source_path="data/superstore.csv",
+                entity_column="Sub-Category",
+                metric_column="Sales",
+                parent_column="Category",
+                parent_value="Technology",
+            ),
+        )
+        state = create_initial_state("Why does Technology have the highest Sales?", "superstore")
+        step = PlanStep(
+            id="step_1",
+            intent="Break down Technology's Sales by Sub-Category.",
+            tool_family="segment_contribution",
+            expected_output="ranked_contributions",
+            success_criteria="ok",
+        )
+        state = state.model_copy(update={"catalog": superstore_catalog, "plan": [step]})
+        update = execute_tools_node(state)
+        assert update["errors"] == []
+        assert len(update["evidence"]) == 1
+        evidence = next(iter(update["evidence"].values()))
+        assert evidence.tool == "segment_contribution"
+        assert evidence.data["parent_value"] == "Technology"
+        assert evidence.data["entities"][0]["rank"] == 1
+
     def test_no_plan_is_a_no_op(self, superstore_catalog):
         state = create_initial_state("How many rows?", "superstore")
         state = state.model_copy(update={"catalog": superstore_catalog})

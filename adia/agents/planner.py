@@ -28,7 +28,14 @@ from adia.models.state import FeasibilityResult, FeasibilityVerdict
 
 #: The only tool families a plan step may name. Anything else is rejected, not guessed at.
 _SUPPORTED_TOOL_FAMILIES = frozenset(
-    {"profile_dataset", "run_sql", "compare_groups", "compute_correlation", "train_model"}
+    {
+        "profile_dataset",
+        "run_sql",
+        "compare_groups",
+        "compute_correlation",
+        "train_model",
+        "segment_contribution",
+    }
 )
 
 #: Deterministic, per-tool-family fill-in for the two `PlanStep` fields the LLM is not asked
@@ -41,6 +48,10 @@ _EXPECTED_OUTPUT_BY_TOOL_FAMILY: dict[str, str] = {
     "train_model": (
         "A trained model's evaluation metric against a naive baseline, plus feature "
         "importance."
+    ),
+    "segment_contribution": (
+        "Ranked contribution of each sub-group to a metric's total, with each entity's "
+        "share of that total."
     ),
 }
 _SUCCESS_CRITERIA_BY_TOOL_FAMILY: dict[str, str] = {
@@ -62,7 +73,10 @@ _SYSTEM_PROMPT = (
     "- compute_correlation: pairwise correlation between numeric columns (not a causal "
     "claim).\n"
     "- train_model: fits a small classification/regression model and reports it against a "
-    "naive baseline.\n\n"
+    "naive baseline.\n"
+    "- segment_contribution: ranks how much each sub-group of a category contributes to a "
+    "metric's total (e.g. which Sub-Categories make up most of a Category's Sales), "
+    "optionally scoped to one parent value. Not a causal claim.\n\n"
     "Rules:\n"
     f"- Produce at most {_MAX_STEPS} steps.\n"
     "- Prefer profile_dataset first for any non-trivial question, unless the question is "
@@ -78,7 +92,9 @@ _SYSTEM_PROMPT = (
     "- Several supporting-analysis steps after it, each with depends_on listing the "
     "observation step's step_id, each testing one distinct possible explanation (e.g. order "
     "volume, average order value, a regional/segment split, a sub-category breakdown) rather "
-    "than all reproducing the same comparison.\n"
+    "than all reproducing the same comparison. When the question asks which sub-group drives "
+    "a total (e.g. 'why is X highest/lowest'), prefer segment_contribution for that step over "
+    "compare_groups -- it ranks contribution to the total, not just group means.\n"
     "- Do not propose a step whose only purpose is to state a causal conclusion -- that is the "
     "Synthesizer's job, from the evidence these steps produce, not something any tool computes."
 )

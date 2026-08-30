@@ -96,6 +96,7 @@ class TestValidPlanGeneration:
             "compare_groups",
             "compute_correlation",
             "train_model",
+            "segment_contribution",
         ]
         output = _PlannerLLMOutput(
             steps=[

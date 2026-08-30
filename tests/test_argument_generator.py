@@ -7,6 +7,7 @@ from adia.agents.argument_generator import (
     _CompareGroupsLLMOutput,
     _ComputeCorrelationLLMOutput,
     _RunSqlLLMOutput,
+    _SegmentContributionLLMOutput,
     _TrainModelLLMOutput,
     generate_tool_arguments,
 )
@@ -300,6 +301,17 @@ def train_model_step() -> PlanStep:
     )
 
 
+@pytest.fixture
+def segment_contribution_step() -> PlanStep:
+    return PlanStep(
+        id="step_sc",
+        intent="Break down price by region within a scope.",
+        tool_family="segment_contribution",
+        expected_output="ranked_contributions",
+        success_criteria="ok",
+    )
+
+
 # ---------------------------------------------------------------------------
 # compare_groups tests
 # ---------------------------------------------------------------------------
@@ -433,6 +445,85 @@ class TestTrainModelArgumentGeneration:
 
         args = generate_tool_arguments(
             train_model_step, catalog, "orders", llm_call=_raising_call
+        )
+        assert args is None
+
+
+# ---------------------------------------------------------------------------
+# segment_contribution tests
+# ---------------------------------------------------------------------------
+
+
+class TestSegmentContributionArgumentGeneration:
+    def test_valid_unscoped_argument_generation(self, catalog, segment_contribution_step):
+        output = _SegmentContributionLLMOutput(entity_column="region", metric_column="price")
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.entity_column == "region"
+        assert args.metric_column == "price"
+        assert args.parent_column is None
+        assert args.parent_value is None
+        assert args.dataset_id == "orders"
+
+    def test_valid_parent_scoped_argument_generation(self, catalog, segment_contribution_step):
+        output = _SegmentContributionLLMOutput(
+            entity_column="region",
+            metric_column="price",
+            parent_column="region",
+            parent_value="west",
+        )
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is not None
+        assert args.parent_column == "region"
+        assert args.parent_value == "west"
+
+    def test_unknown_entity_column_rejected(self, catalog, segment_contribution_step):
+        output = _SegmentContributionLLMOutput(entity_column="nonexistent", metric_column="price")
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_unknown_metric_column_rejected(self, catalog, segment_contribution_step):
+        output = _SegmentContributionLLMOutput(entity_column="region", metric_column="nonexistent")
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_unknown_parent_column_rejected(self, catalog, segment_contribution_step):
+        output = _SegmentContributionLLMOutput(
+            entity_column="region",
+            metric_column="price",
+            parent_column="nonexistent",
+            parent_value="x",
+        )
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_parent_column_without_value_rejected(self, catalog, segment_contribution_step):
+        # SegmentContributionArgs' own model_validator requires both together -- the
+        # ValueError it raises must degrade to None like any other rejected proposal.
+        output = _SegmentContributionLLMOutput(
+            entity_column="region", metric_column="price", parent_column="region"
+        )
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_fake_llm_call(output)
+        )
+        assert args is None
+
+    def test_llm_failure_degrades_to_none(self, catalog, segment_contribution_step):
+        def _raising_call(step, catalog):
+            raise RuntimeError("simulated network failure")
+
+        args = generate_tool_arguments(
+            segment_contribution_step, catalog, "orders", llm_call=_raising_call
         )
         assert args is None
 

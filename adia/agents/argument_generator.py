@@ -12,11 +12,12 @@ from adia.tools.compare_groups import CompareGroupsArgs
 from adia.tools.correlation import ComputeCorrelationArgs
 from adia.tools.ml_model import TrainModelArgs
 from adia.tools.run_sql import RunSqlArgs
+from adia.tools.segment_contribution import SegmentContributionArgs
 from adia.tools.sql_guard import check_sql
 
 #: The tool families this module knows how to generate arguments for.
 _SUPPORTED_TOOL_FAMILIES = frozenset(
-    {"run_sql", "compare_groups", "compute_correlation", "train_model"}
+    {"run_sql", "compare_groups", "compute_correlation", "train_model", "segment_contribution"}
 )
 
 _SYSTEM_PROMPT = (
@@ -36,6 +37,12 @@ _SYSTEM_PROMPT = (
     "task_type (classification or regression), and the model_type.\n"
     "  - classification models: 'logistic_regression', 'random_forest_classifier'\n"
     "  - regression models: 'linear_regression', 'random_forest_regressor'\n"
+    "- For segment_contribution: Propose an entity_column (categorical -- what to break the "
+    "total down by, e.g. Sub-Category) and a metric_column (numeric -- what to decompose, "
+    "e.g. Sales). Optionally propose parent_column and parent_value TOGETHER to scope the "
+    "decomposition to one value (e.g. parent_column='Category', parent_value='Technology') -- "
+    "ground parent_value in the findings from steps this one depends on, if any are shown "
+    "below. Otherwise leave both null.\n"
 )
 
 
@@ -68,8 +75,22 @@ class _TrainModelLLMOutput(BaseModel):
         )
     )
 
+class _SegmentContributionLLMOutput(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    entity_column: str = Field(description="Categorical column to break the total down by.")
+    metric_column: str = Field(description="Numeric column to decompose.")
+    parent_column: str | None = Field(
+        default=None, description="Optional column to scope the decomposition to one value of."
+    )
+    parent_value: str | None = Field(
+        default=None, description="The value of parent_column to scope to, if given."
+    )
 
-OutputArgs = RunSqlArgs | CompareGroupsArgs | ComputeCorrelationArgs | TrainModelArgs
+
+OutputArgs = (
+    RunSqlArgs | CompareGroupsArgs | ComputeCorrelationArgs | TrainModelArgs
+    | SegmentContributionArgs
+)
 
 #: Signature every `llm_call` -- real or a test's fake -- must satisfy.
 LLMCall = Callable[[PlanStep, DatasetCatalog], Any]
@@ -167,6 +188,22 @@ def _build_args(
             task_type=raw.task_type,
             model_type=raw.model_type
         )
+
+    elif tool_family == "segment_contribution":
+        if raw.entity_column not in catalog.column_names():
+            raise ValueError(f"Unknown entity_column: {raw.entity_column}")
+        if raw.metric_column not in catalog.column_names():
+            raise ValueError(f"Unknown metric_column: {raw.metric_column}")
+        if raw.parent_column is not None and raw.parent_column not in catalog.column_names():
+            raise ValueError(f"Unknown parent_column: {raw.parent_column}")
+        return SegmentContributionArgs(
+            dataset_id=dataset_id,
+            source_path=catalog.source_path,
+            entity_column=raw.entity_column,
+            metric_column=raw.metric_column,
+            parent_column=raw.parent_column,
+            parent_value=raw.parent_value,
+        )
     raise ValueError(f"Unsupported tool family: {tool_family}")
 
 
@@ -180,6 +217,7 @@ def _call_openai(step: PlanStep, catalog: DatasetCatalog, dependency_context: st
         "compare_groups": _CompareGroupsLLMOutput,
         "compute_correlation": _ComputeCorrelationLLMOutput,
         "train_model": _TrainModelLLMOutput,
+        "segment_contribution": _SegmentContributionLLMOutput,
     }
     structured_model = model.with_structured_output(schema_map[step.tool_family])
     messages = _build_messages(step, catalog, dependency_context)

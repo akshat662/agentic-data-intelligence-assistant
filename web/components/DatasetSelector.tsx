@@ -16,7 +16,7 @@ interface DatasetSelectorProps {
  */
 export function DatasetSelector({ datasets, selectedDatasetId, onSelect }: DatasetSelectorProps) {
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
       <label htmlFor="dataset-select" className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
         Dataset
       </label>
@@ -24,7 +24,7 @@ export function DatasetSelector({ datasets, selectedDatasetId, onSelect }: Datas
         id="dataset-select"
         value={selectedDatasetId ?? ""}
         onChange={(event) => onSelect(event.target.value)}
-        className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
+        className="w-full min-w-0 truncate rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-800 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
       >
         {datasets.length === 0 && <option value="">No datasets yet</option>}
         {datasets.map((dataset) => (

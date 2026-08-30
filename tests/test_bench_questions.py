@@ -217,5 +217,5 @@ class TestShippedQuestionsFile:
         questions = load_questions(_SHIPPED_QUESTIONS_PATH)
         tiers = [q.evaluation_tier for q in questions]
         assert tiers.count(EvaluationTier.DIRECT) == 16
-        assert tiers.count(EvaluationTier.INVESTIGATION) == 4
+        assert tiers.count(EvaluationTier.INVESTIGATION) == 5
         assert tiers.count(EvaluationTier.REFUSAL) == 5

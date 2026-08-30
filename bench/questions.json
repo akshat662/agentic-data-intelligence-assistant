@@ -153,7 +153,7 @@
       "question": "Why is total Profit lower in the Central region than in the West region?",
       "answerable": true,
       "gold_tools": ["run_sql", "compare_groups"],
-      "notes": "No dedicated segment-contribution/decomposition tool exists yet; answerable today only as an aggregation-plus-comparison, not a full volume-vs-rate decomposition.",
+      "notes": "As of Phase 7, adia/tools/segment_contribution.py can rank each Category/Sub-Category's contribution to the Central-vs-West Profit gap; this question's gold_tools predate that and still reflect an aggregation-plus-comparison investigation. See q026 for a question written specifically to exercise segment_contribution.",
       "investigation": {
         "expected_observation": "Total Profit in the Central region is lower than in the West region.",
         "expected_analysis_dimensions": ["average Sales per order", "average Discount", "Category mix", "Sub-Category mix"],
@@ -248,6 +248,21 @@
         "expected_observation": "Average Discount is higher in the Furniture category than in the Technology category.",
         "expected_analysis_dimensions": ["Sub-Category mix within Furniture", "Region mix", "average Profit by Category"],
         "acceptable_conclusion_style": "States the Furniture-vs-Technology Discount gap plainly and cites it. Describes any supporting comparison as 'associated with' the gap, never as its cause. Explicitly notes no promotional or pricing-policy data exists to establish a definitive cause.",
+        "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
+      }
+    },
+    {
+      "id": "q026",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why does Technology have the highest total Sales among the three categories?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "segment_contribution"],
+      "notes": "Investigation question exercising segment_contribution (Phase 7): expects an observation step (total Sales per Category) plus a segment_contribution step decomposing Technology's total by Sub-Category (parent_column='Category', parent_value='Technology') to show which Sub-Categories actually drive the total, not just that Technology's mean/sum is largest. The dataset has no customer-preference or market data, so any causal 'why' must be reported as an unsupported claim, not established.",
+      "investigation": {
+        "expected_observation": "Technology has the highest total Sales among the three categories.",
+        "expected_analysis_dimensions": ["Sub-Category contribution to Technology's total Sales", "order volume", "average order value", "Region mix"],
+        "acceptable_conclusion_style": "States the Technology-highest fact plainly and cites it. Names which Sub-Categories contribute most to Technology's total (e.g. via share_of_total) as 'associated with' or 'driving' the total in a descriptive, non-causal sense, never asserting a cause. Explicitly notes the dataset lacks customer-preference or market data needed for a true causal explanation.",
         "forbidden_causal_phrases": ["causes", "caused by", "is the reason", "is why", "led to", "resulted in", "due to", "because of"]
       }
     }
