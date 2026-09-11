@@ -572,3 +572,33 @@ class TestRefusalNode:
         validation_update = validation_node(state)
         assert validation_update["validation"].passed is True
         assert validation_update["final_answer"] == update["rendered_answer"]
+
+    def test_refusal_with_a_digit_in_the_reason_still_passes_validation(self):
+        # Regression: a real cross-dataset stress-test question ("...over the next 6 months?")
+        # produced a feasibility reason that quoted that "6" back in its explanation. A refusal
+        # cites zero evidence by design, so the static validator's numeric-claim check --
+        # correctly, for a *real* answer -- has no cited value to match "6" against and used to
+        # reject the refusal outright, falling through to the generic VALIDATION_FALLBACK_ANSWER
+        # instead of showing the actual, correct refusal reason.
+        state = create_initial_state(
+            "Which customers are most likely to stop ordering in the next 6 months?",
+            "superstore",
+        )
+        state = state.model_copy(
+            update={
+                "feasibility": FeasibilityResult(
+                    verdict=FeasibilityVerdict.INFEASIBLE,
+                    reason=(
+                        "Predicting which customers will stop ordering over the next 6 "
+                        "months requires future behavior data that is not present."
+                    ),
+                )
+            }
+        )
+        update = refusal_node(state)
+        state = state.model_copy(update=update)
+        validation_update = validation_node(state)
+        assert validation_update["validation"].passed is True
+        assert validation_update["validation"].issues == []
+        assert validation_update["final_answer"] == update["rendered_answer"]
+        assert validation_update["final_answer"] != VALIDATION_FALLBACK_ANSWER

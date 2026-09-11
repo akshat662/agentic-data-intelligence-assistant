@@ -30,6 +30,15 @@ from adia.models.tool_result import ToolResult
 
 _TOOL_NAME = "compare_groups"
 
+#: `pairwise_differences` is one entry per *unordered pair* of groups -- O(n^2) in the number
+#: of distinct `group_column` values. A genuinely categorical business dimension (Region,
+#: Category, Segment, Contract type, even Country) comfortably fits well under this; a
+#: near-unique identifier (CustomerID, Order ID, ...) does not, and produces millions of
+#: differences between what are effectively single-row "groups" -- expensive to compute, huge
+#: to store as evidence, and analytically meaningless. Rejected outright rather than silently
+#: truncated, so the caller gets an actionable error instead of a partial, misleading result.
+_MAX_GROUPS_FOR_COMPARISON = 50
+
 
 class CompareGroupsArgs(BaseModel):
     """Validated input contract for `compare_groups`."""
@@ -72,8 +81,11 @@ def compare_groups(
         `median`, `std` — ordered by group value ascending), `pairwise_differences`
         (one entry per unordered group pair — `group_a`, `group_b`, `mean_difference` —
         computed as `mean(group_b) - mean(group_a)`), and `causal_claim_allowed: False` (a
-        difference in group means is not evidence of what caused it). On failure, `error`
-        describes exactly what was rejected or what went wrong.
+        difference in group means is not evidence of what caused it). On failure — including
+        `group_column` resolving to more than `_MAX_GROUPS_FOR_COMPARISON` distinct values,
+        e.g. a near-unique identifier column rather than a genuinely categorical one, which
+        would otherwise make `pairwise_differences` grow O(n^2) — `error` describes exactly
+        what was rejected or what went wrong.
     """
     started = time.perf_counter()
     args = {
@@ -130,6 +142,18 @@ def compare_groups(
             ToolErrorKind.INSUFFICIENT_DATA,
             f"No valid rows to compare after dropping missing '{group_column}' values.",
             started,
+        )
+
+    if summary.shape[0] > _MAX_GROUPS_FOR_COMPARISON:
+        return _error_result(
+            args,
+            ToolErrorKind.VALIDATION,
+            f"Column '{group_column}' has {summary.shape[0]} distinct values, too many to "
+            f"compare pairwise (max {_MAX_GROUPS_FOR_COMPARISON}). Choose a column with fewer, "
+            "genuinely categorical values (e.g. Region, Category, Segment) -- for a "
+            "high-cardinality breakdown, use segment_contribution instead.",
+            started,
+            details={"column": group_column, "group_count": int(summary.shape[0])},
         )
 
     summary = summary.sort_index()

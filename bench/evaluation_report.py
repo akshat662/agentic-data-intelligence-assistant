@@ -18,6 +18,7 @@ shape (pure functions plus a thin `main()`), not a different pattern.
 """
 
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -298,13 +299,32 @@ def load_results(path: str | Path = _RESULTS_PATH) -> list[QuestionResult]:
 
 
 def main() -> None:
-    """CLI entry point: build the evaluation report from the last benchmark run and save it."""
-    results = load_results()
-    questions = load_questions(_QUESTIONS_PATH)
+    """CLI entry point: build the evaluation report from a benchmark run and save it.
+
+    Usage: `python -m bench.evaluation_report [path/to/questions.json]`. With no argument,
+    reports on `bench/results/results.json` against `bench/questions.json`, same as before this
+    option existed. With a path argument, reports on that question set's own results file
+    instead (the `<stem>_results.json` name `bench.runner.main` writes for a non-default
+    question set) and writes the report under matching `<stem>_evaluation_report.*` names, so a
+    non-default report never clobbers the canonical one.
+    """
+    questions_path = Path(sys.argv[1]) if len(sys.argv) > 1 else _QUESTIONS_PATH
+    if questions_path == _QUESTIONS_PATH:
+        results_path = _RESULTS_PATH
+        markdown_path = _REPORT_MARKDOWN_PATH
+        json_path = _REPORT_JSON_PATH
+    else:
+        stem = questions_path.stem
+        results_path = _RESULTS_PATH.parent / f"{stem}_results.json"
+        markdown_path = _REPORT_MARKDOWN_PATH.parent / f"{stem}_evaluation_report.md"
+        json_path = _REPORT_JSON_PATH.parent / f"{stem}_evaluation_report.json"
+
+    results = load_results(results_path)
+    questions = load_questions(questions_path)
     summary = generate_summary(results, questions)
-    save_report(summary)
+    save_report(summary, markdown_path=markdown_path, json_path=json_path)
     print(render_markdown(summary))
-    print(f"Report written to {_REPORT_MARKDOWN_PATH} and {_REPORT_JSON_PATH}")
+    print(f"Report written to {markdown_path} and {json_path}")
 
 
 if __name__ == "__main__":

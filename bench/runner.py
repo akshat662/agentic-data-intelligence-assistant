@@ -13,6 +13,7 @@ not this module's -- this module only records what happened, once, per question.
 """
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -175,17 +176,31 @@ def _elapsed_ms(started: float) -> float:
 
 
 def main() -> None:
-    """CLI entry point: run the full shipped benchmark and save results.
+    """CLI entry point: run a benchmark question set and save results.
 
-    Runs every question in `bench/questions.json` through the real graph -- including real
-    LLM calls at every agent -- and writes `bench/results/results.json`.
+    Usage: `python -m bench.runner [path/to/questions.json]`. With no argument, runs
+    `bench/questions.json` (the shipped benchmark) and writes `bench/results/results.json`, same
+    as before this option existed. With a path argument, runs that question set instead and
+    writes results next to the default, named after the input file (e.g.
+    `bench/tough_questions.json` -> `bench/results/tough_questions_results.json`) so a
+    non-default run never clobbers the canonical `results.json`.
+
+    Every run involves real LLM calls at every agent, for every question.
     """
-    results = run_benchmark()
-    save_results(results)
+    questions_path = Path(sys.argv[1]) if len(sys.argv) > 1 else _QUESTIONS_PATH
+    results_path = (
+        _RESULTS_PATH
+        if questions_path == _QUESTIONS_PATH
+        else _RESULTS_PATH.parent / f"{questions_path.stem}_results.json"
+    )
+
+    print(f"Running {questions_path} ...")
+    results = run_benchmark(questions_path)
+    save_results(results, results_path)
     succeeded = sum(1 for r in results if r.success)
     validated = sum(1 for r in results if r.validation_passed)
     print(f"Ran {len(results)} questions: {succeeded} completed, {validated} passed validation.")
-    print(f"Results written to {_RESULTS_PATH}")
+    print(f"Results written to {results_path}")
 
 
 if __name__ == "__main__":

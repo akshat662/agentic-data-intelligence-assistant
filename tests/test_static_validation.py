@@ -155,6 +155,42 @@ class TestNumericEdgeCases:
         assert len(unsupported) == 1
 
 
+class TestSharedNumericWalkBudget:
+    """Covers a real cross-dataset stress-test finding: a large, duplicate-heavy cited
+    evidence record used to be able to exhaust the whole shared node-visit budget on repeat
+    visits to values it had already collected, starving a *different* cited record's distinct
+    values from ever being added -- so a correctly-cited number from that second record was
+    nondeterministically flagged as unsupported, depending on citation_ids' set iteration
+    order. `_walk_numeric` now spends budget only on genuinely new values.
+    """
+
+    def test_large_duplicate_heavy_record_does_not_starve_a_second_record(self):
+        # One record whose raw visit count alone exceeds the budget, almost entirely via a
+        # single repeated value -- mirrors a real run_sql pull of ~1,871 filtered rows with
+        # heavy natural duplication in one column.
+        big_rows = [{"metric": 1.0} for _ in range(6000)]
+        big_ev = _make_evidence("run_sql", {"query": "select metric"}, {"rows": big_rows})
+        # A second, small record with its own genuinely distinct value.
+        small_ev = _make_evidence("compare_groups", {"group_column": "x"}, {"mean": 42.5})
+
+        text = f"The mean was 42.5 [[{small_ev.id}]], drawn from many rows [[{big_ev.id}]]."
+        result = validate_answer(text, [big_ev, small_ev])
+        assert result.passed is True
+        assert result.issues == []
+
+    def test_order_independent_regardless_of_which_evidence_is_walked_first(self):
+        big_rows = [{"metric": float(i % 3)} for i in range(6000)]
+        big_ev = _make_evidence("run_sql", {"query": "select metric"}, {"rows": big_rows})
+        small_ev = _make_evidence("compare_groups", {"group_column": "x"}, {"mean": 999.25})
+
+        text = f"The mean was 999.25 [[{small_ev.id}]] [[{big_ev.id}]]."
+        # Exercise both citation-set orderings directly, not just whatever a Python set
+        # iteration happens to produce for these two IDs in this process.
+        for evidence in ([big_ev, small_ev], [small_ev, big_ev]):
+            result = validate_answer(text, evidence)
+            assert result.passed is True, evidence
+
+
 class TestDeterminism:
     def test_validate_answer_is_deterministic(self):
         ev = _make_evidence("run_sql", {"query": "select 1"}, {"total": 42.17})

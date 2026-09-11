@@ -28,7 +28,12 @@ from adia.evidence.renderer import render_evidence_context
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolError, ToolErrorKind
 from adia.models.plan import PlanStep
-from adia.models.state import AgentState, FeasibilityResult, FeasibilityVerdict
+from adia.models.state import (
+    AgentState,
+    FeasibilityResult,
+    FeasibilityVerdict,
+    ValidationResult,
+)
 from adia.tools.compare_groups import compare_groups
 from adia.tools.correlation import compute_correlation
 from adia.tools.ml_model import train_model
@@ -383,7 +388,24 @@ def validation_node(state: AgentState) -> dict[str, Any]:
     `None`, so the graph always ends with a deterministic response to show the user rather
     than a repair loop. A future Critic node handles semantic overreach this validator doesn't
     check; that node does not exist yet, so nothing here claims to catch it.
+
+    A refusal (`state.refusal is not None`) skips `validate_answer` entirely rather than being
+    run through it like any other answer: `refusal_node` composes its text from Python-verified
+    `FeasibilityResult` fields plus the feasibility agent's free-form `reason` prose, cites no
+    evidence, and asserts no analytical fact about the data — by construction, there is nothing
+    for a *grounding* check to verify (see `refusal_node`'s own docstring). Running
+    `validate_answer` on it anyway is unsound, not just redundant: with zero cited evidence,
+    the numeric-claim check has no way to tell a genuine ungrounded claim apart from a digit
+    that merely appears incidentally in the reason's prose (e.g. a reason explaining there's no
+    data for "the next 6 months" quoting the question) — every such digit would be flagged,
+    intermittently breaking refusals for no reason tied to their actual correctness.
     """
+    if state.refusal is not None:
+        return {
+            "validation": ValidationResult(passed=True, issues=[]),
+            "final_answer": state.rendered_answer,
+        }
+
     result = validate_answer(state.rendered_answer or "", state.evidence)
     final_answer = state.rendered_answer if result.passed else VALIDATION_FALLBACK_ANSWER
     return {"validation": result, "final_answer": final_answer}

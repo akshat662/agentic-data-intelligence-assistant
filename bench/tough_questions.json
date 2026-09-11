@@ -1,0 +1,372 @@
+{
+  "schema_version": 1,
+  "note": "A harder, cross-dataset stress benchmark (30 questions) spanning every dataset registered in data/registry.json whose file actually resolves on disk as of the run that generated this file: 'superstore' (data/superstore.csv), 'telco_churnn' (data/uploads/telco_churnn.csv, the Telco Customer Churn dataset), and 'real_dataset' (data/uploads/real_dataset.csv, the UCI Online Retail transaction dataset -- deliberately chosen because it has no standalone 'Sales' column, only Quantity and UnitPrice, to stress the Planner's derived-metric handling). Complements bench/questions.json rather than replacing it: this set leans harder into null-handling, multi-condition filtering, date arithmetic, ML-based 'predictive' questions, and refusal edge cases (sentiment, missing fields, future forecasts) than the original set does. No gold/oracle answer values, same as bench/questions.json -- see bench/README.md.",
+  "questions": [
+    {
+      "id": "q101",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "For orders with a Discount greater than 20%, what is the total Profit and average Sales for each product Category?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Requires a WHERE filter on Discount combined with GROUP BY Category and two different aggregations (SUM, AVG) in one query."
+    },
+    {
+      "id": "q102",
+      "dataset_id": "superstore",
+      "category": "sql_aggregation",
+      "question": "What is the average number of days between Order Date and Ship Date for each Ship Mode, and how many orders in each Ship Mode resulted in a negative Profit?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Requires date-difference arithmetic (Ship Date minus Order Date) and a conditional count (Profit < 0), both grouped by Ship Mode."
+    },
+    {
+      "id": "q103",
+      "dataset_id": "superstore",
+      "category": "predictive",
+      "question": "How well can Profit be predicted from Sales, Quantity, Discount, and Category combined?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "Profit is one of superstore's registered target_columns; a genuine train_model question, contrasted deliberately with the refusal questions on this dataset that have no valid target column at all."
+    },
+    {
+      "id": "q104",
+      "dataset_id": "superstore",
+      "category": "statistical_comparison",
+      "question": "How do average Discount and average Profit compare between the Consumer segment and the Home Office segment?",
+      "answerable": true,
+      "gold_tools": ["compare_groups"],
+      "notes": "Two metrics compared across the same two groups in one question."
+    },
+    {
+      "id": "q105",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why does the Furniture category have a much lower Profit margin than the Technology category?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups", "segment_contribution"],
+      "notes": "Deeper variant of a similar question in bench/questions.json -- expects the Planner to decompose by Sub-Category, not just restate the Category-level gap.",
+      "investigation": {
+        "expected_observation": "Furniture's Profit margin (Profit / Sales) is substantially lower than Technology's.",
+        "expected_analysis_dimensions": [
+          "average Discount by Sub-Category",
+          "Sub-Category contribution to Furniture's total Profit",
+          "average Sales price per unit",
+          "Quantity per order"
+        ],
+        "acceptable_conclusion_style": "States the margin gap plainly with cited figures. Frames any Discount or Sub-Category pattern as 'associated with' the gap, never as its proven cause, and notes the dataset has no cost data to establish causation definitively.",
+        "forbidden_causal_phrases": [
+          "causes",
+          "caused by",
+          "is the reason",
+          "is why",
+          "led to",
+          "resulted in",
+          "due to",
+          "because of"
+        ]
+      }
+    },
+    {
+      "id": "q106",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "What factors are most strongly associated with orders that result in a financial loss (negative Profit)?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups", "compute_correlation"],
+      "notes": "Open-ended 'what factors' framing, deliberately not naming a candidate dimension up front, to see whether the Planner still proposes a genuine multi-dimension investigation."
+    },
+    {
+      "id": "q107",
+      "dataset_id": "superstore",
+      "category": "root_cause",
+      "question": "Why does the Central region underperform the other regions in total Profit per order?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups", "segment_contribution"],
+      "notes": "Per-order normalization (Profit per order, not raw total Profit) makes this harder than a plain region comparison.",
+      "investigation": {
+        "expected_observation": "Central's average Profit per order is lower than every other region's.",
+        "expected_analysis_dimensions": [
+          "average Discount by region",
+          "Category/Sub-Category mix by region",
+          "average Sales per order by region"
+        ],
+        "acceptable_conclusion_style": "States the per-order Profit gap plainly and cites it. Any Discount-level or Category-mix difference is described as associated with, not causing, the gap; explicitly notes the dataset lacks cost/operational data to settle causation.",
+        "forbidden_causal_phrases": [
+          "causes",
+          "caused by",
+          "is the reason",
+          "is why",
+          "led to",
+          "resulted in",
+          "due to",
+          "because of"
+        ]
+      }
+    },
+    {
+      "id": "q108",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "What will total Sales be next quarter based on current trends?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "Forecasting future, not-yet-occurred data; no forecasting capability and no future rows exist."
+    },
+    {
+      "id": "q109",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "What is the average customer satisfaction rating for orders shipped via Standard Class?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No satisfaction/rating column exists anywhere in this dataset's schema."
+    },
+    {
+      "id": "q110",
+      "dataset_id": "superstore",
+      "category": "unanswerable",
+      "question": "Which customers are most likely to stop ordering entirely over the next 6 months?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "Deliberately contrasted with q103: unlike Profit, there is no 'stopped ordering' / churn label column in this dataset to train a model against, and the question is inherently a future-behavior forecast on top of that."
+    },
+    {
+      "id": "q111",
+      "dataset_id": "telco_churnn",
+      "category": "sql_aggregation",
+      "question": "What is the churn rate (percentage of customers with Churn = 'Yes') for each Contract type, and how many customers fall into each group?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Requires a computed percentage per group plus the group's raw count in the same query."
+    },
+    {
+      "id": "q112",
+      "dataset_id": "telco_churnn",
+      "category": "predictive",
+      "question": "How well can customer Churn be predicted using tenure, Contract, MonthlyCharges, and TotalCharges as features?",
+      "answerable": true,
+      "gold_tools": ["train_model"],
+      "notes": "A named feature subset for a classification target (Churn), reported against a naive baseline."
+    },
+    {
+      "id": "q113",
+      "dataset_id": "telco_churnn",
+      "category": "descriptive",
+      "question": "How many customers have a missing or non-numeric TotalCharges value, and what tenure do these customers share?",
+      "answerable": true,
+      "gold_tools": ["profile_dataset", "run_sql"],
+      "notes": "This is the well-known real-world quirk in the Telco Churn dataset: TotalCharges is stored as text and is blank for a handful of customers with tenure = 0, who never got billed. Tests null/missing-value handling specifically."
+    },
+    {
+      "id": "q114",
+      "dataset_id": "telco_churnn",
+      "category": "statistical_comparison",
+      "question": "How does the churn rate differ between customers with PaperlessBilling enabled versus disabled?",
+      "answerable": true,
+      "gold_tools": ["compare_groups"],
+      "notes": "Churn is a categorical Yes/No column, not numeric -- requires rate computation, not a plain mean comparison."
+    },
+    {
+      "id": "q115",
+      "dataset_id": "telco_churnn",
+      "category": "root_cause",
+      "question": "Why do customers on Month-to-month contracts churn at a much higher rate than customers on One-year or Two-year contracts?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "Three-way contract comparison, not just two groups.",
+      "investigation": {
+        "expected_observation": "The churn rate among Month-to-month customers is substantially higher than among One-year or Two-year contract customers.",
+        "expected_analysis_dimensions": [
+          "average tenure by Contract type",
+          "average MonthlyCharges by Contract type",
+          "PaperlessBilling / PaymentMethod mix by Contract type"
+        ],
+        "acceptable_conclusion_style": "States the churn-rate gap plainly with cited figures. Frames tenure/charges differences as associated with, not the cause of, higher Month-to-month churn; notes the dataset does not capture customers' actual reasons for leaving.",
+        "forbidden_causal_phrases": [
+          "causes",
+          "caused by",
+          "is the reason",
+          "is why",
+          "led to",
+          "resulted in",
+          "due to",
+          "because of"
+        ]
+      }
+    },
+    {
+      "id": "q116",
+      "dataset_id": "telco_churnn",
+      "category": "root_cause",
+      "question": "What factors are most strongly associated with customer churn in this dataset?",
+      "answerable": true,
+      "gold_tools": ["compute_correlation", "compare_groups", "run_sql"],
+      "notes": "The most open-ended question in the whole suite -- no candidate dimension named at all, across a dataset with 20 non-target columns."
+    },
+    {
+      "id": "q117",
+      "dataset_id": "telco_churnn",
+      "category": "root_cause",
+      "question": "Why do customers without OnlineSecurity or TechSupport show a higher churn rate than those with these services?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "Two services combined in one condition (lacking either OnlineSecurity or TechSupport).",
+      "investigation": {
+        "expected_observation": "Customers lacking OnlineSecurity or TechSupport churn at a higher rate than customers who have these services.",
+        "expected_analysis_dimensions": [
+          "InternetService type mix among these customers",
+          "average MonthlyCharges for customers with vs. without these services",
+          "Contract type mix for customers with vs. without these services"
+        ],
+        "acceptable_conclusion_style": "States the churn-rate gap plainly and cites it. Describes any InternetService/Contract-mix pattern as associated with the gap, never as proven causation; notes no support-interaction or satisfaction data exists to confirm a mechanism.",
+        "forbidden_causal_phrases": [
+          "causes",
+          "caused by",
+          "is the reason",
+          "is why",
+          "led to",
+          "resulted in",
+          "due to",
+          "because of"
+        ]
+      }
+    },
+    {
+      "id": "q118",
+      "dataset_id": "telco_churnn",
+      "category": "unanswerable",
+      "question": "Which customers are dissatisfied with their service, based on sentiment expressed in their support call transcripts?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No support-call transcript or free-text field of any kind exists in this dataset; sentiment analysis has nothing to run against."
+    },
+    {
+      "id": "q119",
+      "dataset_id": "telco_churnn",
+      "category": "unanswerable",
+      "question": "What specific reason did each churned customer give for canceling their service?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "There is a Churn Yes/No outcome column but no cancellation-reason or comments field."
+    },
+    {
+      "id": "q120",
+      "dataset_id": "telco_churnn",
+      "category": "unanswerable",
+      "question": "How many total customers will the company have by the end of next year?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "A future business projection; this is a static customer snapshot with no time series of subscriber counts to extrapolate from."
+    },
+    {
+      "id": "q121",
+      "dataset_id": "real_dataset",
+      "category": "sql_aggregation",
+      "question": "What is the total revenue (Quantity multiplied by UnitPrice) for each Country, and how many distinct invoices does each Country have?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "No 'Sales'/'revenue' column exists -- revenue must be derived as Quantity * UnitPrice inline in SQL, plus a distinct-invoice count in the same query. Directly exercises the Planner's derived-metric rule."
+    },
+    {
+      "id": "q122",
+      "dataset_id": "real_dataset",
+      "category": "sql_aggregation",
+      "question": "How many rows have a missing CustomerID, and what percentage of total revenue (Quantity times UnitPrice) do these rows represent?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Combines null-handling (CustomerID is blank for guest/unlinked transactions) with a derived-metric percentage-of-total calculation."
+    },
+    {
+      "id": "q123",
+      "dataset_id": "real_dataset",
+      "category": "sql_aggregation",
+      "question": "Excluding cancelled invoices (where InvoiceNo starts with 'C') and rows with a negative Quantity, what are the top 5 best-selling products by total Quantity sold?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Two independent exclusion conditions (an InvoiceNo prefix match and a negative-Quantity filter) plus a GROUP BY / ORDER BY / LIMIT."
+    },
+    {
+      "id": "q124",
+      "dataset_id": "real_dataset",
+      "category": "descriptive",
+      "question": "What is the date range covered by this dataset, and how many distinct customers, products, and countries appear in it?",
+      "answerable": true,
+      "gold_tools": ["profile_dataset"],
+      "notes": "Same shape as bench/questions.json's q001, against a dataset two orders of magnitude larger (541k+ rows)."
+    },
+    {
+      "id": "q125",
+      "dataset_id": "real_dataset",
+      "category": "statistical_comparison",
+      "question": "How does the average order value (Quantity times UnitPrice, summed per invoice) compare between customers in the United Kingdom and customers in Germany?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "The metric being compared (per-invoice order value) must itself be derived and aggregated by invoice before the group comparison runs -- a two-stage computation."
+    },
+    {
+      "id": "q126",
+      "dataset_id": "real_dataset",
+      "category": "sql_aggregation",
+      "question": "What percentage of all transactions have a negative Quantity, and what is the total value of these returned or cancelled transactions?",
+      "answerable": true,
+      "gold_tools": ["run_sql"],
+      "notes": "Percentage-of-total plus a derived-metric SUM, both conditioned on the same filter."
+    },
+    {
+      "id": "q127",
+      "dataset_id": "real_dataset",
+      "category": "root_cause",
+      "question": "Why does the United Kingdom account for such a disproportionately large share of total revenue compared to other countries?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "segment_contribution"],
+      "notes": "Revenue itself is a derived metric here (Quantity * UnitPrice), so this question stresses segment_contribution's ability to decompose a metric the dataset doesn't store directly.",
+      "investigation": {
+        "expected_observation": "The United Kingdom's share of total revenue is far larger than any other single country's share.",
+        "expected_analysis_dimensions": [
+          "number of distinct customers by country",
+          "number of distinct invoices by country",
+          "average order value by country"
+        ],
+        "acceptable_conclusion_style": "States the UK's revenue share plainly and cites it. Frames customer-count or order-value patterns as associated with the concentration, never as a proven cause; notes the dataset gives no direct signal on why the customer base is UK-concentrated (e.g. no marketing/geographic-reach data).",
+        "forbidden_causal_phrases": [
+          "causes",
+          "caused by",
+          "is the reason",
+          "is why",
+          "led to",
+          "resulted in",
+          "due to",
+          "because of"
+        ]
+      }
+    },
+    {
+      "id": "q128",
+      "dataset_id": "real_dataset",
+      "category": "root_cause",
+      "question": "What factors are associated with transactions that have unusually high Quantity values (bulk purchases)?",
+      "answerable": true,
+      "gold_tools": ["run_sql", "compare_groups"],
+      "notes": "'Unusually high' is not a pre-defined threshold in the data -- the Planner/tool arguments must establish one (e.g. a percentile or fixed cutoff) before comparing groups."
+    },
+    {
+      "id": "q129",
+      "dataset_id": "real_dataset",
+      "category": "unanswerable",
+      "question": "What will total revenue be for next year based on current sales trends?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "Future forecasting; the dataset is a fixed historical transaction log with no forecasting capability available."
+    },
+    {
+      "id": "q130",
+      "dataset_id": "real_dataset",
+      "category": "unanswerable",
+      "question": "What is the average customer satisfaction score for orders shipped to each country?",
+      "answerable": false,
+      "gold_tools": [],
+      "notes": "No satisfaction/rating field exists anywhere in this dataset's schema (InvoiceNo, StockCode, Description, Quantity, InvoiceDate, UnitPrice, CustomerID, Country only)."
+    }
+  ]
+}

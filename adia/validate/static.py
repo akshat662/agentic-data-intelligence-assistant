@@ -138,7 +138,13 @@ def _extract_claimed_numbers(text: str) -> list[float]:
 def _collect_numeric_values(
     evidence_by_id: dict[str, Evidence], citation_ids: set[str]
 ) -> set[float]:
-    """Collect every numeric leaf value found anywhere in the cited evidence records."""
+    """Collect every numeric leaf value found anywhere in the cited evidence records.
+
+    `citation_ids` is a `set`, so the order its members are walked in is not guaranteed to
+    match citation order in the answer text (or anything else stable) -- `_walk_numeric`'s
+    budget must therefore never let one record's traversal order starve another's, regardless
+    of which is walked first. See `_walk_numeric` for how.
+    """
     values: set[float] = set()
     budget = [_MAX_WALK_NODES]
     for evidence_id in citation_ids:
@@ -147,7 +153,20 @@ def _collect_numeric_values(
 
 
 def _walk_numeric(node: Any, values: set[float], budget: list[int]) -> None:
-    """Recursively collect numeric leaves from a tool's result data, bounded by `budget`."""
+    """Recursively collect numeric leaves from a tool's result data, bounded by `budget`.
+
+    `budget` is spent only on a value actually new to `values`, never on a mere revisit of one
+    already collected. This matters when `_collect_numeric_values` walks several evidence
+    records against one shared budget: a `run_sql` result with thousands of rows but heavy
+    natural duplication (e.g. a Quantity or Discount column with only a handful of distinct
+    values) used to spend the *entire* budget on repeat visits to values already in the set,
+    before a later-walked, much smaller record's genuinely distinct values were ever reached --
+    silently dropping them from `values` and making a correctly-cited number get flagged as
+    unsupported, nondeterministically, depending on `citation_ids`' unspecified iteration
+    order. Charging budget per new value instead means a record's *distinct* value count is
+    what's bounded, which is also the only thing that could ever change whether some claimed
+    number matches -- a revisit could never do that regardless of budget.
+    """
     if budget[0] <= 0:
         return
     if isinstance(node, dict):
@@ -159,8 +178,10 @@ def _walk_numeric(node: Any, values: set[float], budget: list[int]) -> None:
     elif isinstance(node, bool):
         return
     elif isinstance(node, int | float):
-        values.add(float(node))
-        budget[0] -= 1
+        as_float = float(node)
+        if as_float not in values:
+            values.add(as_float)
+            budget[0] -= 1
 
 
 def _check_numbers_supported(

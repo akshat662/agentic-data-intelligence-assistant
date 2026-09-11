@@ -179,6 +179,51 @@ class TestInvalidDataTypes:
         assert result.error.details["column"] == "region"
 
 
+class TestTooManyGroups:
+    """Covers a real cross-dataset stress-test finding: grouping by a near-unique identifier
+    column (e.g. a customer ID) makes `pairwise_differences` grow O(n^2) -- one real 4,372
+    -distinct-value CustomerID column produced 9.5 million pairwise differences from a single
+    call, expensive to compute and large enough to break downstream evidence validation.
+    """
+
+    @pytest.fixture
+    def high_cardinality_path(self, tmp_path) -> str:
+        # 60 distinct "customer" ids -- one row each -- past _MAX_GROUPS_FOR_COMPARISON (50).
+        df = pd.DataFrame(
+            {
+                "customer_id": [f"C{i}" for i in range(60)],
+                "amount": [float(i) for i in range(60)],
+            }
+        )
+        path = tmp_path / "wide.parquet"
+        df.to_parquet(path)
+        return str(path)
+
+    def test_rejects_group_column_over_the_limit(self, high_cardinality_path, store):
+        result = compare_groups("wide", high_cardinality_path, "customer_id", "amount", store)
+        assert result.ok is False
+        assert result.error.kind == ToolErrorKind.VALIDATION
+        assert result.error.details.get("column") == "customer_id"
+        assert result.error.details.get("group_count") == 60
+
+    def test_no_evidence_written_when_rejected(self, high_cardinality_path, store):
+        compare_groups("wide", high_cardinality_path, "customer_id", "amount", store)
+        assert len(store) == 0
+
+    def test_column_at_the_limit_is_still_accepted(self, tmp_path, store):
+        df = pd.DataFrame(
+            {
+                "category": [f"cat_{i}" for i in range(50)],
+                "amount": [float(i) for i in range(50)],
+            }
+        )
+        path = tmp_path / "at_limit.parquet"
+        df.to_parquet(path)
+        result = compare_groups("at_limit", str(path), "category", "amount", store)
+        assert result.ok is True
+        assert result.data["group_count"] == 50
+
+
 class TestInsufficientData:
     def test_all_missing_group_values_returns_insufficient_data(self, tmp_path, store):
         df = pd.DataFrame({"region": [None, None], "price": [1.0, 2.0]})
