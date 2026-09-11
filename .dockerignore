@@ -3,9 +3,6 @@
 .env.*
 !.env.example
 
-# Frontend -- has its own image (web/Dockerfile) built from its own context.
-web/
-
 # Python
 .venv/
 __pycache__/

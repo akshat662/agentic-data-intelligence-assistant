@@ -190,8 +190,9 @@ uv run python -m adia
 ```
 
 The CLI is a thin prompt over the same graph the benchmark runs — no separate demo path, no
-mocked responses. The Next.js frontend (`web/`, see "Deployment" below) drives the identical
-graph over HTTP/SSE instead of a terminal — same plans, same tools, same grounding.
+mocked responses. The Streamlit UI (`app.py`, see "Running the Streamlit UI" below) drives the
+identical graph from a chat interface instead of a terminal — same plans, same tools, same
+grounding.
 
 ### Demo Walkthrough
 
@@ -276,15 +277,14 @@ adia/
     cli.py      # python -m adia — a thin interface, no business logic
     api/        # FastAPI backend (app.py, routes.py, service.py, schemas.py) — thin
                 #   interface over the same graph; see "Deployment" below
-    ui/         # reserved for a possible future in-repo UI; empty — superseded by web/
+    ui/         # reserved for a possible future in-repo UI component split; empty for now
 
-web/            # Next.js frontend (App Router, TypeScript, Tailwind) — see "Deployment" below
-    app/            # page.tsx — the single-page chat demo
-    components/     # DatasetUpload, DatasetSelector, ChatWindow, ProgressTimeline,
-                     #   EvidencePanel, ValidationBadge
-    lib/            # api.ts (fetch wrappers), sse.ts (SSE stream parser),
-                     #   types.ts (hand-mirrors adia/api/schemas.py)
-    hooks/          # useChat.ts — the one useReducer driving a chat session
+app.py          # Streamlit UI — CSV upload, dataset registration, chat, LangGraph step trace;
+                 #   drives the same adia.graph/adia.api.service code the CLI and API do
+
+scripts/
+    download_dataset.py  # fetches a real ~540k-row retail dataset to data/real_dataset.csv,
+                          #   for trying the Streamlit uploader without hunting for a CSV
 
 bench/
     questions.json          # 25 questions: direct, investigation (root_cause), and refusal
@@ -317,26 +317,23 @@ choice made along the way, and [`docs/INTERVIEW.md`](docs/INTERVIEW.md) for a co
 walkthrough of the "why" behind the architecture, with a real example of the validation layer
 catching an unsupported claim.
 
-## Running the Full Stack Locally
+## Running the Streamlit UI
 
-Two processes, in two terminals — the backend must be running before the frontend can answer
-anything:
+One process — `app.py` drives the graph in-process (no separate API server required):
 
 ```bash
-# Terminal 1 — backend (FastAPI + the graph above), http://localhost:8000
 cp .env.example .env               # then fill in OPENAI_API_KEY
 uv sync
-uv run python -m adia.api
-
-# Terminal 2 — frontend (Next.js), http://localhost:3000
-cd web
-cp .env.local.example .env.local   # defaults already point at localhost:8000
-npm install
-npm run dev
+uv run streamlit run app.py
 ```
 
-Open `http://localhost:3000`, ask a question against the pre-registered `superstore` dataset,
-or upload your own CSV first.
+Open `http://localhost:8501`, ask a question against the pre-registered `superstore` dataset,
+or upload your own CSV from the sidebar first (see `scripts/download_dataset.py` for a real
+CSV to try the uploader with).
+
+The FastAPI backend (`adia/api`) still exists as a separate, headless interface over the same
+graph — useful for a non-Streamlit client or a future frontend — and can be run independently
+with `uv run python -m adia.api`, but `app.py` does not require it to be running.
 
 ## Deployment
 
@@ -344,11 +341,8 @@ or upload your own CSV first.
 Browser
   │  HTTPS
   ▼
-Vercel  (Next.js — web/)              NEXT_PUBLIC_API_BASE_URL → the backend URL below
-  │  HTTPS — fetch + SSE (POST /chat/stream)
-  ▼
-Render  (FastAPI — adia/api)          OPENAI_API_KEY, ADIA_CORS_ORIGINS → the Vercel URL
-  │  HTTPS
+Streamlit Community Cloud (app.py)    OPENAI_API_KEY
+  │
   ▼
 OpenAI API
 ```
@@ -356,68 +350,41 @@ OpenAI API
 No database, no queue, no auth layer, in production exactly as in development — this project's
 scope has deliberately never included them (see [`docs/DECISIONS.md`](docs/DECISIONS.md)). The
 shipped `superstore` dataset (`data/registry.json`, `data/superstore.csv`, `data/catalog/`) is
-tracked in git and deploys with the backend, so the demo always has a working dataset
-immediately after every deploy. **Known limitation, by design, not an oversight:** a CSV
-uploaded through `POST /datasets` is written to the backend's local filesystem
-(`data/uploads/`) — on most PaaS free/starter tiers that storage does not survive a restart or
-redeploy. Uploaded datasets are session-lived in production; the pre-registered `superstore`
-dataset is not affected.
+tracked in git and deploys with the app, so the demo always has a working dataset immediately
+after every deploy. **Known limitation, by design, not an oversight:** a CSV uploaded through
+the Streamlit sidebar is written to the app's local filesystem (`data/uploads/`) — on most PaaS
+free/starter tiers that storage does not survive a restart or redeploy. Uploaded datasets are
+session-lived in production; the pre-registered `superstore` dataset is not affected.
 
-### Backend → Render (recommended)
+### App → Streamlit Community Cloud (recommended)
 
-Render auto-detects this as a Python project from `pyproject.toml`/`uv.lock` — no Dockerfile
-needed for this path.
-
-1. New **Web Service**, point it at this repo.
-2. Build command: `pip install uv && uv sync --frozen --no-dev`
-3. Start command: `uv run python -m adia.api`
-4. Environment variables (Render dashboard → Environment):
+1. New app, point it at this repo, main file path `app.py`.
+2. Environment variable (App → Settings → Secrets):
 
    | Variable | Required | Value |
    |---|---|---|
    | `OPENAI_API_KEY` | yes | your OpenAI key |
    | `OPENAI_MODEL` | no | defaults to `gpt-4o-mini` |
-   | `ADIA_CORS_ORIGINS` | yes | your Vercel URL, e.g. `https://adia.vercel.app` |
-   | `PORT` | no | Render injects this itself; `adia/api/__main__.py` reads it automatically |
 
-Alternates with the same shape: Railway, Fly.io. Not recommended: Vercel serverless functions
-for this service — it needs a long-lived process that can hold an SSE connection open and run
-`pandas`/`duckdb`/`langgraph`, which doesn't fit a serverless function's execution model well.
-Free-tier caveat worth knowing: Render's free tier sleeps after inactivity, so the first request
-after idle has a cold-start delay — expected for a research/demo deployment, not a bug.
-
-### Frontend → Vercel (recommended)
-
-1. Import this repo into Vercel, set the project **root directory to `web/`**.
-2. Vercel auto-detects Next.js; no build command changes needed.
-3. Environment variable (Vercel dashboard → Settings → Environment Variables), **set before the
-   first build** — Next.js inlines `NEXT_PUBLIC_*` variables at build time, not at server start:
-
-   | Variable | Required | Value |
-   |---|---|---|
-   | `NEXT_PUBLIC_API_BASE_URL` | yes | your Render backend URL, e.g. `https://adia-api.onrender.com` |
+Alternates with the same shape: Render, Railway, Fly.io, or any host that runs a long-lived
+Python process (`uv run streamlit run app.py --server.port $PORT`).
 
 ### Docker (optional, self-host fallback)
 
-Neither recommended host above needs this — it exists for portability to any other host or a
-self-managed VPS, and to let a reviewer run the exact production start command locally.
+Not required for the Streamlit UI above — it exists for portability to any host that prefers a
+container, and to let a reviewer run the headless FastAPI backend independently of Streamlit.
 
 ```bash
 docker compose up --build
 ```
 
-builds and runs both services together (`Dockerfile` for the backend, `web/Dockerfile` for the
-frontend), reading `OPENAI_API_KEY`/`OPENAI_MODEL` from a local `.env` at container **run**
-time — secrets are never copied into either image (see `.dockerignore`/`web/.dockerignore`).
-To build/run them independently:
+builds and runs the backend (`Dockerfile`), reading `OPENAI_API_KEY`/`OPENAI_MODEL` from a
+local `.env` at container **run** time — secrets are never copied into the image (see
+`.dockerignore`). To build/run it directly:
 
 ```bash
 docker build -t adia-backend .
-docker run -p 8000:8000 --env-file .env -e ADIA_CORS_ORIGINS=https://your-frontend-url adia-backend
-
-docker build -t adia-frontend web \
-  --build-arg NEXT_PUBLIC_API_BASE_URL=https://your-backend-url
-docker run -p 3000:3000 adia-frontend
+docker run -p 8000:8000 --env-file .env adia-backend
 ```
 
 ### Environment variables — full reference
@@ -426,10 +393,9 @@ docker run -p 3000:3000 adia-frontend
 |---|---|---|---|---|
 | `OPENAI_API_KEY` | backend | yes | — | `adia/agents/llm_config.py` |
 | `OPENAI_MODEL` | backend | no | `gpt-4o-mini` | `adia/agents/llm_config.py` |
-| `ADIA_CORS_ORIGINS` | backend | recommended in prod | `http://localhost:3000` | `adia/api/app.py` |
+| `ADIA_CORS_ORIGINS` | backend | recommended in prod | `http://localhost:3000` | `adia/api/app.py` (only relevant if the headless FastAPI backend is exposed to a browser client) |
 | `PORT` / `ADIA_API_PORT` | backend | no | `8000` | `adia/api/__main__.py` |
 | `ADIA_API_HOST` | backend | no | `0.0.0.0` | `adia/api/__main__.py` |
 | `ADIA_API_RELOAD` | backend | no | `false` | `adia/api/__main__.py` (dev only) |
-| `NEXT_PUBLIC_API_BASE_URL` | frontend | yes in prod | `http://localhost:8000` | `web/lib/api.ts` (inlined at build time) |
 
-Templates: [`.env.example`](.env.example) (backend), [`web/.env.local.example`](web/.env.local.example) (frontend).
+Template: [`.env.example`](.env.example).

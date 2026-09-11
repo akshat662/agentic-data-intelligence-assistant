@@ -3,6 +3,7 @@
 import pytest
 
 from adia.agents.synthesizer import (
+    _SYSTEM_PROMPT,
     _build_messages,
     _mechanical_fallback,
     _sanitize_label,
@@ -154,7 +155,7 @@ class TestMechanicalFallback:
             {empty_evidence.id: empty_evidence},
             llm_call=_raising_call,
         )
-        assert "reported no scalar values" in answer
+        assert "found no reportable values" in answer
         assert f"[[{empty_evidence.id}]]" in answer
 
 
@@ -179,7 +180,7 @@ class TestMechanicalFallbackValueSelection:
             "Top products by sales?", {run_sql_evidence.id: run_sql_evidence}
         )
         # Ranking still keys off the raw "rows[0].Sales", but display sanitizes the label.
-        assert "rows.Sales = 5000.0" in answer
+        assert "rows.Sales of 5000.0" in answer
 
     def test_train_model_fallback_prefers_metric_value_over_model_type(self):
         # Same principle: model_type is deprioritized (non-numeric), not banned outright.
@@ -202,7 +203,7 @@ class TestMechanicalFallbackValueSelection:
         answer = _mechanical_fallback(
             "How well can Region be predicted?", {train_model_evidence.id: train_model_evidence}
         )
-        assert "metric_value = 0.83" in answer
+        assert "metric_value of 0.83" in answer
 
     def test_select_fallback_values_ranks_numeric_non_count_first(self):
         key_values = {
@@ -364,7 +365,7 @@ class TestMechanicalFallbackLabelSanitization:
             "How well can Region be predicted?", {train_model_evidence.id: train_model_evidence}
         )
         assert "[0]" not in answer
-        assert "feature_importance.importance = 0.4" in answer
+        assert "feature_importance.importance of 0.4" in answer
         result = validate_answer(answer, {train_model_evidence.id: train_model_evidence})
         assert result.passed is True
 
@@ -400,6 +401,37 @@ class TestMechanicalFallbackLabelSanitization:
         first = _mechanical_fallback("Which products?", evidence_map)
         second = _mechanical_fallback("Which products?", evidence_map)
         assert first == second
+
+
+class TestMechanicalFallbackQuestionDigitSafety:
+    """Covers a second guarantee-breaking gap distinct from the index-sanitization fix above:
+    the fallback used to echo the raw question into its header line, and `validate_answer`
+    scans the *entire* answer text for number-shaped substrings -- so a question containing
+    any digit not also present in the evidence (e.g. "top 5 products") made this "always
+    passes validate_answer" safety net fail on exactly the runs where it was needed most.
+    """
+
+    def test_question_digit_absent_from_evidence_does_not_break_fallback(self):
+        evidence = _make_evidence(
+            "profile_dataset",
+            {"dataset_id": "telco"},
+            {"row_count": 7043, "column_count": 21},
+        )
+        answer = _mechanical_fallback(
+            "Provide names of any 5 columns present in this dataset",
+            {evidence.id: evidence},
+        )
+        result = validate_answer(answer, {evidence.id: evidence})
+        assert result.passed is True
+        assert result.issues == []
+
+    def test_question_text_is_not_echoed_into_the_answer(self):
+        evidence = _make_evidence("profile_dataset", {"dataset_id": "telco"}, {"row_count": 7043})
+        answer = _mechanical_fallback(
+            "Provide names of any 5 columns present in this dataset",
+            {evidence.id: evidence},
+        )
+        assert "Provide names" not in answer
 
 
 class TestBuildMessages:
@@ -449,3 +481,163 @@ class TestLLMFailureHandling:
             {evidence.id: evidence},
         )
         assert f"[[{evidence.id}]]" in answer
+
+
+class TestFallbackExcludesBookkeepingFields:
+    """Regression coverage: bookkeeping fields must never leak into a user-facing fallback
+    answer as if they were a meaningful analytical result -- reported live as raw text like
+    "memory_bytes = 3502235" surfacing in the final answer.
+    """
+
+    def test_memory_bytes_is_never_selected(self):
+        key_values = {"memory_bytes": 3502235, "row_count": 9994}
+        selected = _select_fallback_values(key_values)
+        assert "memory_bytes" not in dict(selected)
+        assert dict(selected)["row_count"] == 9994
+
+    def test_column_count_is_never_selected(self):
+        key_values = {"column_count": 21, "row_count": 9994}
+        selected = _select_fallback_values(key_values)
+        assert "column_count" not in dict(selected)
+
+    def test_columns_count_is_never_selected(self):
+        key_values = {"columns_count": 21, "row_count": 9994}
+        selected = _select_fallback_values(key_values)
+        assert "columns_count" not in dict(selected)
+
+    def test_column_names_count_is_never_selected(self):
+        key_values = {"column_names_count": 21, "row_count": 9994}
+        selected = _select_fallback_values(key_values)
+        assert "column_names_count" not in dict(selected)
+
+    def test_row_count_and_overall_count_remain_eligible(self):
+        # Explicitly not excluded -- these can genuinely be the answer (e.g. "how many rows").
+        assert dict(_select_fallback_values({"row_count": 9994}))["row_count"] == 9994
+        assert dict(_select_fallback_values({"overall_count": 1847}))["overall_count"] == 1847
+
+    def test_excluded_fields_absent_from_profile_dataset_style_evidence(self):
+        profile_evidence = _make_evidence(
+            "profile_dataset",
+            {"dataset_id": "superstore"},
+            {
+                "dataset_id": "superstore",
+                "row_count": 9994,
+                "column_count": 21,
+                "column_names_count": 21,
+                "memory_bytes": 3502235,
+                "columns_count": 21,
+            },
+        )
+        answer = _mechanical_fallback("How many rows?", {profile_evidence.id: profile_evidence})
+        assert "memory_bytes" not in answer
+        assert "column_count" not in answer
+        assert "columns_count" not in answer
+        assert "column_names_count" not in answer
+        assert "row_count" in answer
+
+    def test_all_excluded_leaves_no_selection_but_no_crash(self):
+        key_values = {
+            "memory_bytes": 1,
+            "column_count": 2,
+            "columns_count": 3,
+            "column_names_count": 4,
+        }
+        assert _select_fallback_values(key_values) == []
+
+
+class TestSanitizeLabelStripsStructuralPrefixes:
+    """Regression coverage: the renderer's generic list-container names (`groups`, `entities`)
+    must not leak into fallback text verbatim -- a reader has no way to know what "groups" or
+    "entities" refers to out of context.
+    """
+
+    def test_groups_mean_becomes_mean(self):
+        assert _sanitize_label("groups.mean") == "mean"
+
+    def test_groups_median_becomes_median(self):
+        assert _sanitize_label("groups.median") == "median"
+
+    def test_entities_total_becomes_total(self):
+        assert _sanitize_label("entities.total") == "total"
+
+    def test_entities_share_of_total_becomes_share_of_total(self):
+        assert _sanitize_label("entities.share_of_total") == "share_of_total"
+
+    def test_indexed_entities_key_strips_both_index_and_prefix(self):
+        # The renderer emits "entities[0].total"; index-stripping runs first ("entities.total"),
+        # then the structural-prefix strip removes "entities." -- both fixes compose correctly.
+        assert _sanitize_label("entities[0].total") == "total"
+
+    def test_indexed_groups_key_strips_both_index_and_prefix(self):
+        assert _sanitize_label("groups[2].mean") == "mean"
+
+    def test_unrelated_list_containers_are_left_alone(self):
+        # Not a general "drop every container name" rule -- run_sql's "rows" is untouched,
+        # matching the existing, still-passing TestSanitizeLabel/TestMechanicalFallback... tests.
+        assert _sanitize_label("rows[0].total_sales") == "rows.total_sales"
+
+    def test_bare_structural_prefix_alone_is_untouched(self):
+        # A single-segment key literally named "groups" (no sub-field) isn't a
+        # "prefix + real label" shape -- nothing to strip, so it passes through as-is.
+        assert _sanitize_label("groups") == "groups"
+
+    def test_full_fallback_answer_uses_clean_labels(self):
+        compare_groups_evidence = _make_evidence(
+            "compare_groups",
+            {"group_column": "Category", "metric_column": "Sales"},
+            {
+                "groups": [
+                    {"group": "Technology", "mean": 452.71, "median": 166.16, "std": 1108.66}
+                ],
+            },
+        )
+        answer = _mechanical_fallback(
+            "Which category has the highest mean Sales?",
+            {compare_groups_evidence.id: compare_groups_evidence},
+        )
+        assert "groups.mean" not in answer
+        assert "groups.median" not in answer
+        assert "mean of 452.71" in answer
+
+
+class TestMechanicalFallbackWordingIsUserFacing:
+    """Regression coverage for the exact live-app symptom: the fallback must read like a
+    terse note, not internal tool serialization.
+    """
+
+    def test_header_does_not_say_draft_answer_for(self):
+        evidence_map = {}
+        answer = _mechanical_fallback("Any question?", evidence_map)
+        assert "Draft answer for" not in answer
+
+    def test_records_are_not_phrased_as_reports(self):
+        run_sql_evidence = _make_evidence(
+            "run_sql", {"query": "select 1"}, {"row_count": 5}
+        )
+        answer = _mechanical_fallback("How many rows?", {run_sql_evidence.id: run_sql_evidence})
+        assert "reports" not in answer
+
+
+class TestSynthesizerPromptDisambiguatesCountVsTotal:
+    """Regression coverage for the count/total disambiguation rule: the synthesizer must be
+    told a transaction count and a revenue total are not interchangeable, and must be told
+    which explicit wording maps to which.
+    """
+
+    def test_prompt_distinguishes_count_from_total(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "count" in lowered
+        assert "total" in lowered
+        assert "not interchangeable" in lowered or "not the same" in lowered
+
+    def test_prompt_maps_explicit_revenue_wording_to_total_evidence(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "total sales" in lowered or "revenue" in lowered
+
+    def test_prompt_maps_explicit_count_wording_to_count_evidence(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "number of orders" in lowered or "number of transactions" in lowered
+
+    def test_prompt_instructs_disambiguation_when_genuinely_ambiguous(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "ambiguous" in lowered

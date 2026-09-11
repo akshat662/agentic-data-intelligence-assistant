@@ -3,6 +3,7 @@
 import pandas as pd
 import pytest
 
+from adia.evidence.renderer import render_evidence
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolErrorKind
 from adia.tools.profile_dataset import profile_dataset
@@ -190,3 +191,57 @@ class TestErrorHandling:
     def test_no_evidence_written_on_failure(self, store):
         profile_dataset("orders", "/no/such/file.parquet", store)
         assert len(store) == 0
+
+
+class TestColumnNamesPreview:
+    """`column_names_preview` -- a plain string -- must survive into the evidence's rendered
+    summary even for a dataset with more than 10 columns, since that's the only way the
+    Synthesizer actually sees any column name (not just a count) for such a dataset.
+    """
+
+    @pytest.fixture
+    def wide_dataset_path(self, tmp_path) -> str:
+        # 15 columns -- past the evidence renderer's small-list expansion threshold (10).
+        df = pd.DataFrame({f"col_{i}": [1, 2, 3] for i in range(15)})
+        path = tmp_path / "wide.parquet"
+        df.to_parquet(path)
+        return str(path)
+
+    def test_preview_lists_all_names_for_a_small_dataset(self, dataset_path, store):
+        result = profile_dataset("orders", dataset_path, store)
+        preview = result.data["column_names_preview"]
+        for name in ["price", "region", "order_date", "is_returned"]:
+            assert name in preview
+
+    def test_preview_present_in_rendered_evidence_summary_beyond_ten_columns(
+        self, wide_dataset_path, store
+    ):
+        result = profile_dataset("wide", wide_dataset_path, store)
+        assert result.data["column_count"] == 15
+        stored = store.get(result.evidence_id)
+        rendered = render_evidence(stored)
+        # The generic renderer still only reports a count for the raw `column_names` list...
+        assert rendered.key_values["column_names_count"] == 15
+        assert "column_names[0]" not in rendered.key_values
+        # ...but the preview string is a leaf value, so it survives untouched and carries the
+        # actual column names into what the Synthesizer is shown.
+        assert rendered.key_values["column_names_preview"] == result.data["column_names_preview"]
+        assert "col_0" in rendered.summary
+        assert "col_14" in rendered.summary
+
+    def test_preview_truncated_past_limit(self, tmp_path, store):
+        df = pd.DataFrame({f"col_{i}": [1] for i in range(210)})
+        path = tmp_path / "very_wide.parquet"
+        df.to_parquet(path)
+        result = profile_dataset("very_wide", str(path), store)
+        preview = result.data["column_names_preview"]
+        assert "col_199" in preview
+        assert "col_200" not in preview
+        assert "10 more column" in preview
+
+    def test_empty_dataset_preview_says_no_columns(self, tmp_path, store):
+        df = pd.DataFrame(index=[0, 1, 2])
+        path = tmp_path / "no_columns.parquet"
+        df.to_parquet(path)
+        result = profile_dataset("empty_cols", str(path), store)
+        assert result.data["column_names_preview"] == "(no columns)"

@@ -2,7 +2,13 @@
 
 import pytest
 
-from adia.agents.planner import _build_messages, _PlannerLLMOutput, _PlanStepLLMOutput, create_plan
+from adia.agents.planner import (
+    _SYSTEM_PROMPT,
+    _build_messages,
+    _PlannerLLMOutput,
+    _PlanStepLLMOutput,
+    create_plan,
+)
 from adia.models.catalog import ColumnProfile, DatasetCatalog, SemanticType
 from adia.models.state import FeasibilityResult, FeasibilityVerdict
 
@@ -234,3 +240,21 @@ class TestLLMFailureHandling:
         # load_llm_settings(), fail on the missing key, and be caught, never raised.
         plan = create_plan("Sales by region?", catalog, feasible)
         assert plan == []
+
+
+class TestPromptDisambiguatesCompareGroupsFromTotals:
+    """Regression coverage: the planner must be told compare_groups reports mean/median/std,
+    not a sum/total, so it isn't reached for as a stand-in for "which group has the largest
+    total X" -- the exact live-app confusion this covers.
+    """
+
+    def test_prompt_states_compare_groups_lacks_a_total(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "compare_groups" in lowered
+        assert "not report a group's total" in lowered or "does not report" in lowered
+        assert "total" in lowered
+
+    def test_prompt_points_to_segment_contribution_or_run_sql_for_totals(self):
+        lowered = _SYSTEM_PROMPT.lower()
+        assert "segment_contribution" in lowered
+        assert "sum(" in lowered

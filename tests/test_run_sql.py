@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from adia.data.catalog import build_catalog
+from adia.evidence.renderer import render_evidence
 from adia.evidence.store import EvidenceStore
 from adia.models.errors import ToolErrorKind
 from adia.tools.run_sql import run_sql
@@ -27,6 +28,25 @@ def catalog(tmp_path, orders_df):
     path = tmp_path / "orders.parquet"
     orders_df.to_parquet(path)
     return build_catalog(orders_df, dataset_id="orders", source_path=str(path))
+
+
+@pytest.fixture
+def wide_orders_df() -> pd.DataFrame:
+    # 55 rows -- past the evidence renderer's small-list expansion threshold (10) and past
+    # run_sql's own preview row limit (50), to exercise both boundaries in one fixture.
+    return pd.DataFrame(
+        {
+            "region": [f"region_{i}" for i in range(55)],
+            "price": [float(i) for i in range(55)],
+        }
+    )
+
+
+@pytest.fixture
+def wide_catalog(tmp_path, wide_orders_df):
+    path = tmp_path / "wide_orders.parquet"
+    wide_orders_df.to_parquet(path)
+    return build_catalog(wide_orders_df, dataset_id="orders", source_path=str(path))
 
 
 @pytest.fixture
@@ -113,6 +133,52 @@ class TestInvalidColumns:
         assert result.ok is False
         assert result.error.kind == ToolErrorKind.GUARD_REJECTED
         assert result.error.details.get("column") == "nonexistent"
+
+
+class TestRowsPreview:
+    """`rows_preview` -- a Markdown-table string -- must survive into the evidence's rendered
+    summary even when there are more rows than the evidence renderer's generic list-
+    summarization (`adia.evidence.renderer`) would otherwise expand inline (>10 items), since
+    that's the only way the Synthesizer actually sees fetched values for such a result.
+    """
+
+    def test_small_result_preview_contains_header_and_values(self, catalog, store):
+        result = run_sql(
+            "SELECT region, price FROM orders WHERE region = 'north'", catalog, store
+        )
+        preview = result.data["rows_preview"]
+        assert "region" in preview and "price" in preview
+        assert "north" in preview
+
+    def test_preview_present_in_rendered_evidence_summary_beyond_ten_rows(
+        self, wide_catalog, store
+    ):
+        # 55 rows -- well past the renderer's small-list expansion threshold (10), the exact
+        # shape that silently dropped every fetched value before this fix.
+        result = run_sql("SELECT region, price FROM orders", wide_catalog, store)
+        assert result.data["row_count"] == 55
+        stored = store.get(result.evidence_id)
+        rendered = render_evidence(stored)
+        # The generic renderer still only reports a count for the raw `rows` list...
+        assert rendered.key_values["rows_count"] == 55
+        assert "rows[0].region" not in rendered.key_values
+        # ...but the preview string is a leaf value, so it survives untouched and carries the
+        # actual fetched values into what the Synthesizer is shown.
+        assert rendered.key_values["rows_preview"] == result.data["rows_preview"]
+        assert "region_0" in rendered.summary
+
+    def test_preview_truncated_and_notes_remaining_rows(self, wide_catalog, store):
+        result = run_sql("SELECT region, price FROM orders", wide_catalog, store)
+        assert result.data["row_count"] == 55
+        assert "5 more row" in result.data["rows_preview"]
+        # header + sep + 50 rows joined by "\n" (51 newlines) + 1 for the truncation note line
+        assert result.data["rows_preview"].count("\n") == 52
+        assert "region_49" in result.data["rows_preview"]
+        assert "region_50" not in result.data["rows_preview"]
+
+    def test_empty_result_preview_says_no_rows(self, catalog, store):
+        result = run_sql("SELECT price FROM orders WHERE region = 'nowhere'", catalog, store)
+        assert result.data["rows_preview"] == "(no rows returned)"
 
 
 class TestDeterminism:

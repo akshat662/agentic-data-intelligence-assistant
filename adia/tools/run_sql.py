@@ -26,6 +26,10 @@ from adia.tools.sql_guard import SqlGuardError, check_sql
 
 _TOOL_NAME = "run_sql"
 
+#: Row cap for `_format_rows_preview` -- generous enough to answer a typical aggregation/
+#: lookup question, bounded so a wide result set can't blow up the Synthesizer's prompt.
+_PREVIEW_ROW_LIMIT = 50
+
 
 class RunSqlArgs(BaseModel):
     """Validated input contract for `run_sql`."""
@@ -57,9 +61,13 @@ def run_sql(
         default_limit: Row limit injected by the guard when the query has none.
 
     Returns:
-        A `ToolResult`. On success, `data` holds `{"rows", "row_count", "columns"}` and
-        `evidence_id` names the written `Evidence` record. On failure, `error` describes
-        exactly what was rejected or what went wrong, and no evidence is written.
+        A `ToolResult`. On success, `data` holds `{"rows", "row_count", "columns", "rows_preview"}`
+        -- `rows_preview` is a Markdown-table rendering of `rows` (see `_format_rows_preview`),
+        capped at `_PREVIEW_ROW_LIMIT` rows, kept alongside the full `rows` so the Synthesizer
+        can actually see fetched values even when there are too many rows for the evidence
+        renderer's generic list-summarization to expand inline -- and `evidence_id` names the
+        written `Evidence` record. On failure, `error` describes exactly what was rejected or
+        what went wrong, and no evidence is written.
     """
     started = time.perf_counter()
     args = {"query": query, "dataset_id": catalog.dataset_id}
@@ -106,6 +114,7 @@ def run_sql(
         "rows": rows,
         "row_count": len(rows),
         "columns": list(rows[0].keys()) if rows else [],
+        "rows_preview": _format_rows_preview(rows),
     }
     evidence = evidence_store.add(
         Evidence(
@@ -130,6 +139,48 @@ def run_sql(
         warnings=warnings,
         duration_ms=_elapsed_ms(started),
     )
+
+
+def _format_rows_preview(rows: list[dict[str, Any]], *, limit: int = _PREVIEW_ROW_LIMIT) -> str:
+    """Render fetched rows as a Markdown table, capped at `limit` rows.
+
+    `data["rows"]` alone is not enough for the Synthesizer to see a query's actual result:
+    `adia.evidence.renderer`'s generic list-summarization deliberately collapses any list over
+    10 items down to a bare count (by design, so one tool's huge result doesn't blow up every
+    other evidence record's rendered size) -- which means a `run_sql` call returning more than
+    10 rows (e.g. one row per country, one per category) would otherwise leave the Synthesizer
+    with only a row count and no actual fetched values to cite, no matter how small the result
+    genuinely is. A plain string is a leaf value to that same renderer regardless of how many
+    rows went into building it, so this preview survives the summarization untouched and always
+    reaches the Synthesizer's prompt. `data["rows"]` itself is left as the full, unlimited,
+    machine-readable result -- this is a human/LLM-readable rendering of it, not a replacement,
+    and the grounding validator (`adia.validate.static.validate_answer`) checks claimed numbers
+    against `data["rows"]` directly, not against this string.
+
+    Args:
+        rows: Query result rows, each a column-name-keyed dict (as returned by
+            `adia.tools.duckdb_client.execute_query`).
+        limit: Maximum number of rows to render before truncating.
+
+    Returns:
+        A Markdown table (header, separator, one line per row), with a trailing note if `rows`
+        was truncated to `limit`. `"(no rows returned)"` if `rows` is empty.
+    """
+    if not rows:
+        return "(no rows returned)"
+
+    columns = list(rows[0].keys())
+    header = "| " + " | ".join(columns) + " |"
+    separator = "| " + " | ".join("---" for _ in columns) + " |"
+    body = [
+        "| " + " | ".join(str(row.get(col, "")) for col in columns) + " |"
+        for row in rows[:limit]
+    ]
+    table = "\n".join([header, separator, *body])
+
+    if len(rows) > limit:
+        table += f"\n... ({len(rows) - limit} more row(s) truncated)"
+    return table
 
 
 def _error_result(

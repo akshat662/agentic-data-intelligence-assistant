@@ -28,6 +28,10 @@ from adia.models.tool_result import ToolResult
 _TOOL_NAME = "profile_dataset"
 _CATEGORICAL_LIKE_TYPES = {SemanticType.CATEGORICAL, SemanticType.BOOLEAN}
 
+#: Cap for `_format_column_names_preview` -- generous for any realistic column count, bounded
+#: so a genuinely wide dataset can't blow up the Synthesizer's prompt.
+_COLUMN_NAMES_PREVIEW_LIMIT = 200
+
 
 class ProfileDatasetArgs(BaseModel):
     """Validated input contract for `profile_dataset`."""
@@ -65,7 +69,11 @@ def profile_dataset(
         `column_count`, `column_names`, `memory_bytes`) plus a `columns` list with one entry
         per column: name, dtype, semantic type, missing count/percentage, unique count,
         numeric min/max, datetime min/max, and — for categorical/boolean columns —
-        `top_values`. On failure, `error` describes exactly what went wrong.
+        `top_values`. Also includes `column_names_preview`, a comma-separated rendering of
+        `column_names` (see `_format_column_names_preview`) kept alongside the full list so the
+        Synthesizer can actually see the names for any dataset with more than 10 columns, which
+        the evidence renderer's generic list-summarization would otherwise hide. On failure,
+        `error` describes exactly what went wrong.
     """
     started = time.perf_counter()
     args = {"dataset_id": dataset_id, "source_path": source_path, "top_k": top_k}
@@ -118,14 +126,48 @@ def _build_profile_data(df: pd.DataFrame, catalog: DatasetCatalog, *, top_k: int
     columns = [
         _column_profile_data(df[column.name], column, top_k=top_k) for column in catalog.columns
     ]
+    column_names = catalog.column_names()
     return {
         "dataset_id": catalog.dataset_id,
         "row_count": catalog.row_count,
         "column_count": len(catalog.columns),
-        "column_names": catalog.column_names(),
+        "column_names": column_names,
+        "column_names_preview": _format_column_names_preview(column_names),
         "memory_bytes": int(df.memory_usage(deep=True).sum()),
         "columns": columns,
     }
+
+
+def _format_column_names_preview(
+    column_names: list[str], *, limit: int = _COLUMN_NAMES_PREVIEW_LIMIT
+) -> str:
+    """Render column names as a comma-separated string, capped at `limit` names.
+
+    `data["column_names"]` alone is not enough for the Synthesizer to actually see the names:
+    `adia.evidence.renderer`'s generic list-summarization deliberately collapses any list over
+    10 items down to a bare count (so one tool's large result can't blow up every other
+    evidence record's rendered size) -- which means a dataset with more than 10 columns (the
+    common case) would otherwise leave the Synthesizer with only `column_names_count` and no
+    actual names to answer "what are the columns" with, no matter how ordinary the question.
+    A plain string is a leaf value to that same renderer regardless of how many names went
+    into building it, so this preview survives the summarization untouched and always reaches
+    the Synthesizer's prompt -- the same fix already applied to `run_sql`'s `rows_preview`.
+    `data["column_names"]` itself is left as the full, unlimited, machine-readable list.
+
+    Args:
+        column_names: The dataset's column names, in catalog order.
+        limit: Maximum number of names to render before truncating.
+
+    Returns:
+        Comma-separated column names, with a trailing note if truncated. `"(no columns)"` if
+        `column_names` is empty.
+    """
+    if not column_names:
+        return "(no columns)"
+    preview = ", ".join(column_names[:limit])
+    if len(column_names) > limit:
+        preview += f", ... ({len(column_names) - limit} more column(s) truncated)"
+    return preview
 
 
 def _column_profile_data(

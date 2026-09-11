@@ -40,6 +40,24 @@ _MAX_FALLBACK_VALUES_PER_RECORD = 3
 #: never touches the key used to look up a value, or the value itself.
 _INDEX_SEGMENT_PATTERN = re.compile(r"\[\d+\]")
 
+#: Generic list-container names the renderer's flattening (`adia.evidence.renderer._walk_summary`)
+#: embeds as a key's leading segment -- e.g. "groups.mean" from `compare_groups`'s `groups`
+#: list, "entities.total" from `segment_contribution`'s `entities` list. Meaningful for looking
+#: the value up, meaningless to a reader who only cares about "mean" or "total"; stripped by
+#: `_sanitize_label` for display only, same as the list-index stripping above. Deliberately
+#: narrow (not every list-shaped key, e.g. `run_sql`'s `rows` is left alone): these two are the
+#: specific containers that made fallback text read like a raw field dump in practice.
+_STRUCTURAL_PREFIXES = frozenset({"groups", "entities"})
+
+#: Pure bookkeeping about the evidence record's own shape (a dataset's memory footprint, how
+#: many columns it has) -- never a meaningful analytical answer regardless of which tool
+#: produced it, unlike `row_count`/`overall_count`, which can genuinely be the answer to a
+#: question (e.g. "how many rows"). Excluded from `_select_fallback_values` entirely, not just
+#: deprioritized -- these should never appear in a fallback answer at all.
+_EXCLUDED_FALLBACK_KEYS = frozenset(
+    {"memory_bytes", "column_count", "columns_count", "column_names_count"}
+)
+
 _SYSTEM_PROMPT = (
     "You are the synthesis component of a data analysis system. You are given a user's "
     "question and a rendered summary of evidence already computed by deterministic tools. "
@@ -64,7 +82,23 @@ _SYSTEM_PROMPT = (
     "- What remains unsupported -- if the evidence cannot establish why something happened "
     "(no cited evidence explicitly permits causal language -- see the rules on causal "
     "claims already enforced downstream), say so explicitly rather than implying a cause. "
-    "Correlation or comparison evidence describes what co-occurs, not what causes what."
+    "Correlation or comparison evidence describes what co-occurs, not what causes what.\n\n"
+    "A question about 'sales' can be genuinely ambiguous between two different quantities: "
+    "how many transactions/orders there are (a count) and how much revenue they add up to (a "
+    "total, e.g. from a tool's total_sales/overall_total/share_of_total fields). These are "
+    "NOT interchangeable, and picking the wrong one -- or blending them into one claim -- "
+    "produces a misleading answer even if every number is individually grounded:\n"
+    "- If the question explicitly says 'total sales', 'sales revenue', 'revenue', or "
+    "equivalent, answer using total/share-of-total evidence.\n"
+    "- If the question explicitly says 'number of orders', 'number of transactions', or "
+    "other count-like wording, answer using count evidence.\n"
+    "- If the wording is genuinely ambiguous (e.g. plain 'sales' or 'number of sales'), do "
+    "not silently pick one: state both, each clearly labeled as what it is (e.g. 'by total "
+    "revenue, X; by number of transactions, Y'), citing each separately -- unless only one of "
+    "the two is actually present in the evidence below, in which case answer with the one "
+    "that is.\n"
+    "- Never present a count and a total as if they were the same kind of quantity, and never "
+    "let one imply or stand in for the other."
 )
 
 
@@ -135,24 +169,35 @@ def _mechanical_fallback(question: str, evidence: Mapping[str, Evidence]) -> str
     Restates each evidence record's most meaningful reported values verbatim (see
     `_select_fallback_values`), cited by its evidence ID -- it states nothing it didn't
     already have in hand, so it can never itself fail `validate_answer`. Displayed labels are
-    sanitized (`_sanitize_label`) so a list index embedded in a flattened key name (e.g. the
-    `0` in `rows[0].total_sales`) can't be misread as an unsupported claimed number; the
-    numeric value printed after `=` is always the real, untouched evidence value.
+    sanitized (`_sanitize_label`) so a list index or structural container name embedded in a
+    flattened key name (e.g. the `0` in `rows[0].total_sales`, or the `groups.` in
+    `groups.mean`) reads as plain, user-facing text (`total_sales`, `mean`) instead of internal
+    serialization; the numeric value itself is always the real, untouched evidence value.
+    This is still a plain, templated restatement, not natural-language prose -- it is a safety
+    net, not a substitute for the LLM's own answer -- but it should read like a terse analyst
+    note, not a debug dump.
+
+    Deliberately never echoes `question` into the returned text: `validate_answer` scans the
+    *entire* answer for number-shaped substrings, and a question containing any digit (e.g.
+    "top 5 products", "which 3 regions") would otherwise be misread as an ungrounded claimed
+    number the instant that digit didn't also happen to appear in the cited evidence --
+    breaking the exact "can never itself fail validate_answer" guarantee this function exists
+    to provide.
     """
-    lines = [f"Draft answer for: {question}", ""]
+    lines = ["Here is what the evidence shows:", ""]
     for record in sorted(evidence.values(), key=lambda e: e.id):
         rendered = render_evidence(record)
         selected = _select_fallback_values(rendered.key_values)
         if not selected:
-            lines.append(f"{rendered.tool} ran but reported no scalar values [[{record.id}]].")
+            lines.append(f"{rendered.tool} found no reportable values [[{record.id}]].")
         else:
-            pairs = ", ".join(f"{_sanitize_label(key)} = {value}" for key, value in selected)
-            lines.append(f"{rendered.tool} reports {pairs} [[{record.id}]].")
+            pairs = ", ".join(f"{_sanitize_label(key)} of {value}" for key, value in selected)
+            lines.append(f"{rendered.tool} found {pairs} [[{record.id}]].")
     return "\n".join(lines)
 
 
 def _sanitize_label(key: str) -> str:
-    """Strip list-index brackets from a dotted-path key, for display only.
+    """Strip list-index brackets and generic structural container prefixes, for display only.
 
     The renderer's flattened keys (`adia.evidence.renderer._walk_summary`) embed a list's
     numeric index directly in the key name, e.g. `rows[0].total_sales` or, for nested lists,
@@ -163,17 +208,29 @@ def _sanitize_label(key: str) -> str:
     readable label (`rows.total_sales`) without changing which value it names or the value
     itself; the key used to look up `value` in `_select_fallback_values` is never touched.
 
+    Additionally, a leading segment naming a generic list container this fallback text would
+    otherwise expose verbatim (`_STRUCTURAL_PREFIXES` -- `groups`, `entities`) is dropped, so
+    `groups.mean` displays as `mean` and `entities.total` displays as `total`: a reader has no
+    way to know what "groups" or "entities" refers to out of context, while "mean"/"total" are
+    self-explanatory. Only the two containers that made fallback text read like a raw field
+    dump in practice are stripped -- this is not a general "drop every list-container name"
+    rule (`run_sql`'s `rows`, for instance, is left alone).
+
     Args:
         key: A dotted-path key as produced by the renderer, e.g. `rows[0].total_sales`.
 
     Returns:
-        The key with every `[<digits>]` segment removed and stray leading/trailing/duplicate
-        dots cleaned up. Falls back to `"value"` if stripping leaves nothing (a bare top-level
-        list index, e.g. `[0]`, has no other text to display).
+        The key with every `[<digits>]` segment removed, a leading `_STRUCTURAL_PREFIXES`
+        segment dropped if present, and stray leading/trailing/duplicate dots cleaned up.
+        Falls back to `"value"` if stripping leaves nothing (a bare top-level list index, e.g.
+        `[0]`, has no other text to display).
     """
     stripped = _INDEX_SEGMENT_PATTERN.sub("", key)
     stripped = re.sub(r"\.{2,}", ".", stripped).strip(".")
-    return stripped or "value"
+    segments = [segment for segment in stripped.split(".") if segment]
+    if len(segments) > 1 and segments[0].lower() in _STRUCTURAL_PREFIXES:
+        segments = segments[1:]
+    return ".".join(segments) or "value"
 
 
 def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]:
@@ -183,8 +240,12 @@ def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]
     may put a bookkeeping field (e.g. the renderer's own synthesized `rows_count`) or a
     configuration/identifier field (e.g. `model_type`) ahead of the actual analytical result
     (an aggregated figure, a correlation coefficient, a model's metric value) simply because
-    of insertion order. Two independent, tool-agnostic signals correct for that, combined
-    additively so neither strictly overrides the other:
+    of insertion order. `_EXCLUDED_FALLBACK_KEYS` (`memory_bytes`, `column_count`,
+    `columns_count`, `column_names_count`) is filtered out entirely first -- these are pure
+    bookkeeping about the evidence's own shape, never a meaningful analytical answer regardless
+    of tool, unlike `row_count`/`overall_count`, which stay eligible since they can genuinely
+    be the answer to a question (e.g. "how many rows"). Two independent, tool-agnostic signals
+    then rank what's left, combined additively so neither strictly overrides the other:
 
     - `count_penalty`: 1 if the key name contains "count" -- catches both the renderer's own
       synthesized list-length keys and count-flavored tool fields, deprioritized (not
@@ -203,8 +264,11 @@ def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]
 
     Returns:
         Up to `_MAX_FALLBACK_VALUES_PER_RECORD` `(key, value)` pairs, best first. Empty if
-        `key_values` is empty.
+        `key_values` is empty or every key is excluded bookkeeping.
     """
+
+    def _bare_name(key: str) -> str:
+        return _INDEX_SEGMENT_PATTERN.sub("", key).rsplit(".", 1)[-1]
 
     def _penalty(indexed_item: tuple[int, tuple[str, Any]]) -> tuple[int, int]:
         index, (key, value) = indexed_item
@@ -213,7 +277,10 @@ def _select_fallback_values(key_values: dict[str, Any]) -> list[tuple[str, Any]]
         type_penalty = 0 if is_numeric else 1
         return (count_penalty + type_penalty, index)
 
-    ranked = sorted(enumerate(key_values.items()), key=_penalty)
+    eligible = [
+        item for item in key_values.items() if _bare_name(item[0]) not in _EXCLUDED_FALLBACK_KEYS
+    ]
+    ranked = sorted(enumerate(eligible), key=_penalty)
     return [pair for _, pair in ranked[:_MAX_FALLBACK_VALUES_PER_RECORD]]
 
 

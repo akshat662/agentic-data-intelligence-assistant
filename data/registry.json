@@ -7,5 +7,29 @@
       "Profit",
       "Sales"
     ]
+  },
+  {
+    "dataset_id": "1",
+    "file_path": "/Users/akshatgarg/Desktop/agentic-data-intelligence-assistant/data/uploads/1.csv",
+    "description": "telecome dataset",
+    "target_columns": null
+  },
+  {
+    "dataset_id": "telco_churn",
+    "file_path": "/Users/akshatgarg/Desktop/agentic-data-intelligence-assistant/data/uploads/telco_churn.csv",
+    "description": "Telecom customer churn dataset containing customer demographics, services, contract information, charges, and churn outcomes.",
+    "target_columns": null
+  },
+  {
+    "dataset_id": "real_dataset",
+    "file_path": "/Users/akshatgarg/Desktop/placement/agentic-data-intelligence-assistant/data/uploads/real_dataset.csv",
+    "description": "Uploaded dataset from real_dataset.csv.",
+    "target_columns": null
+  },
+  {
+    "dataset_id": "telco_churnn",
+    "file_path": "/Users/akshatgarg/Desktop/placement/agentic-data-intelligence-assistant/data/uploads/telco_churnn.csv",
+    "description": "Uploaded dataset from telco_churn.csv.",
+    "target_columns": null
   }
 ]
