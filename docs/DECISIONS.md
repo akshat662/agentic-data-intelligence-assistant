@@ -27,6 +27,223 @@ What does this decision commit us to? What does it rule out?
 
 ---
 
+## 2026-09-11: Streamlit UI replaces the Next.js frontend
+
+**Status:** Accepted
+
+**Context:**
+The original browser interface was a Next.js frontend (`web/`) calling the FastAPI backend
+(`adia/api/`) over `fetch`/SSE — two processes, two languages, two deploy targets (Vercel +
+Render), kept in sync by hand-mirrored TypeScript types (`web/lib/types.ts`) against
+`adia/api/schemas.py`. That split earns its cost when the frontend and backend genuinely need
+to scale or deploy independently; for a project whose entire point is to demonstrate one
+Python system's reasoning, it added a second language, a second dependency tree
+(`web/package.json`), and a second deploy target for no capability the graph itself needed.
+
+**Decision:**
+Delete `web/` entirely. Add `app.py`, a single-file Streamlit UI that imports
+`adia.graph.state`/`adia.graph.workflow`/`adia.api.service` directly and drives the graph
+in-process — no HTTP hop, no second server to start or keep running, one deploy target
+(Streamlit Community Cloud or any host that runs one Python process). Dataset upload reuses
+`adia.api.service.register_dataset` directly for the same reason `POST /datasets` did. The
+FastAPI backend was kept, unmodified, as an independent, headless interface — `app.py` does not
+call it and does not require it running; it remains available for a non-Streamlit client or a
+future separate frontend.
+
+**Alternatives considered:**
+- Keep `web/`, add `app.py` alongside it as a second frontend — rejected: two frontends against
+  one backend is more surface to keep in sync than this project needs, for a capability
+  (a second UI framework) nothing about the system's core claim depends on demonstrating.
+- Delete the FastAPI backend too, since `app.py` doesn't need it — rejected: `adia/api/` costs
+  nothing to keep (it's a thin, already-tested interface layer with its own test suite,
+  `tests/test_api.py`), and keeping it preserves a real, working HTTP/SSE path for any future
+  client that isn't Streamlit, without reintroducing the two-frontend problem above.
+
+**Consequences:**
+One process to run for the full browser demo (`uv run streamlit run app.py`), one deploy
+target, no TypeScript in the repository, no hand-mirrored type contract to keep in sync. The
+tradeoff: the FastAPI backend's SSE contract (§9 of `docs/ARCHITECTURE.md`) is now demonstrated
+by its own test suite rather than by a live frontend consuming it end-to-end — acceptable,
+since that contract was already independently tested and unchanged by this decision.
+
+---
+
+## 2026-09-11: Planner must route derivable metrics through `run_sql`, never `compare_groups`/`segment_contribution`
+
+**Status:** Accepted
+
+**Context:**
+Tested against a raw dataset lacking a pre-aggregated metric column — the UCI Online Retail
+dataset (`data/real_dataset.csv`: `InvoiceNo`, `StockCode`, `Quantity`, `UnitPrice`, ... but no
+`Sales`/`revenue` column) — the Planner correctly reasoned in its feasibility step that
+"Sales = Quantity × UnitPrice" was derivable, but then proposed a `compare_groups` or
+`segment_contribution` step with `metric_column="Sales"` anyway. Neither tool can compute a
+derived expression; `metric_column` must name a real column in the dataset, so the step failed
+outright with a column-not-found error.
+
+**Decision:**
+Add an explicit, high-visibility rule to the Planner's system prompt
+(`adia/agents/planner.py`): if a question's metric isn't a standalone column but is
+mathematically derivable from columns that do exist, the step **must** use `run_sql` (which can
+express the derivation inline, e.g. `SUM(Quantity * UnitPrice)`), never `compare_groups` or
+`segment_contribution`. The rule is stated once in the "Rules" section and repeated as a
+one-line caveat directly on both tools' own descriptions in the same prompt — repetition next
+to the specific tools being misused, not just a rule buried in a list, is what actually changed
+the Planner's behavior in testing.
+
+**Alternatives considered:**
+- Teach `compare_groups`/`segment_contribution` to accept a SQL expression as `metric_column`
+  instead of a bare column name — rejected: it would blur the boundary these tools intentionally
+  keep ("propose a validated column, not a validated expression"), and reopens exactly the kind
+  of free-form-input surface `adia.tools.sql_guard` exists to contain for `run_sql` alone.
+- Have `feasibility_node` pre-compute derived columns onto the DataFrame before the Planner ever
+  sees it — rejected: this is real, undisclosed data transformation happening outside any tool
+  call, with no evidence record and no citation trail — exactly the kind of ungrounded
+  computation this system's entire design exists to prevent.
+
+**Consequences:**
+A question about a metric the dataset doesn't store as a column, but can compute, now reaches
+`run_sql` reliably instead of crashing a step. This is a prompt-level fix, not a code-level
+guarantee — it is not unit-tested against the LLM's actual behavior (only that the prompt text
+itself contains the rule, `tests/test_planner_agent.py`), so a future model swap or prompt
+regression could reopen this gap without a failing test catching it directly; the mitigation is
+the same repeated-near-the-tool phrasing that fixed it once already, still in place.
+
+---
+
+## 2026-09-11: `run_sql`/`profile_dataset` result previews, and a fallback that stopped echoing the question
+
+**Status:** Accepted
+
+**Context:**
+Three related failures surfaced in close succession, all traceable to one blind spot:
+`adia.evidence.renderer`'s generic list-summarization deliberately collapses any list over 10
+items down to a bare count, so no single tool's huge result can blow up every other evidence
+record's rendered size. That's the right call for, say, `train_model`'s `feature_importance` —
+but it meant:
+1. A `run_sql` query returning more than 10 rows (e.g. one row per country) left the Synthesizer
+   with `rows_count: 38` and zero actual fetched values — it could see *how many* rows came
+   back, never *what was in them*.
+2. `profile_dataset` on any dataset with more than 10 columns (the common case) left the
+   Synthesizer with `column_names_count: 21` and no actual names — asked "what are 5 of the
+   columns," the honest, correct response was "the evidence doesn't say."
+3. Diagnosing (2) surfaced a third, independent bug: `_mechanical_fallback`
+   (`adia/agents/synthesizer.py`) — the safety net documented as "can never itself fail
+   grounding validation" — echoed the raw question into its header line. A question containing
+   any digit not also present in evidence (e.g. "provide names of any **5** columns") made the
+   fallback state an ungrounded "5," breaking the one guarantee it exists to provide, on exactly
+   the runs where it was needed most.
+
+**Decision:**
+- Add `rows_preview` (`run_sql`) and `column_names_preview` (`profile_dataset`): plain strings
+  — a Markdown table capped at 50 rows, and a comma-separated name list capped at 200 —
+  computed alongside the existing unbounded `rows`/`column_names` fields. A string is a leaf
+  value to the renderer regardless of how many rows or columns went into building it, so both
+  survive the generic collapsing untouched and always reach the Synthesizer's prompt.
+- Stop echoing `question` in `_mechanical_fallback`'s output entirely; replaced with a fixed,
+  content-free header line.
+
+**Alternatives considered:**
+- Raise the renderer's small-list threshold above 10 — rejected: it's shared by every tool's
+  evidence, and raising it for `run_sql`/`profile_dataset` would raise it for everything,
+  reintroducing the exact "one huge result crowds out everything else" problem the threshold
+  exists to prevent (and is directly what the next entry's shared-budget bug is about).
+- Mask or strip digits out of the echoed question in the fallback instead of removing it —
+  rejected: a mangled restatement ("Provide names of any columns") reads as broken, is no
+  more informative to a reader than no restatement at all (the question is already visible as
+  the user's own chat turn / CLI prompt in every real caller), and a masking regex is one more
+  thing that could itself have edge cases.
+
+**Consequences:**
+Both tools' full, unbounded data remains available to the grounding validator exactly as
+before — these previews are additive rendering fixes, not new tool capability. Verified against
+the real UCI dataset and the real Telco Churn dataset (both regularly exceed 10 rows/columns)
+with a real LLM call, not just unit tests. Any *future* tool whose result can exceed 10 items
+and needs to be citable in prose inherits the same blind spot until it gets an equivalent
+preview field — this fix is per-tool, not a change to the renderer's own default behavior.
+
+---
+
+## 2026-09-11: A 30-question, cross-dataset stress benchmark surfaced three validation-layer bugs
+
+**Status:** Accepted
+
+**Context:**
+`bench/questions.json` (26 questions, one dataset) had reached 100% validation pass rate,
+which risked reflecting a well-worn happy path more than genuine robustness. A new,
+deliberately harder suite (`bench/tough_questions.json`, 30 questions across `superstore`,
+`telco_churnn`, and the 541k-row `real_dataset`, leaning into null handling, multi-condition
+filters, derived metrics, and refusal edge cases) was run end-to-end against the real graph.
+The first run scored 28/30 on validation. Diagnosing the two failures — and a third that
+appeared on a subsequent rerun of the same suite — found three independent bugs, none of them
+in the LLM's reasoning:
+1. **Shared numeric-walk budget starvation** (`adia/validate/static.py`): the grounding
+   validator's numeric-claim check shared one 5,000-node budget across every cited evidence
+   record, decrementing it on every *visit* to a numeric leaf, not every new one. A large,
+   duplicate-heavy `run_sql` result (1,871 rows, heavy repetition in most columns) could burn
+   the entire budget on repeat visits to values already collected before a different, smaller
+   cited record's genuinely distinct values were ever walked — nondeterministically rejecting
+   that second record's correctly cited number, depending on `citation_ids`' unspecified `set`
+   iteration order alone.
+2. **Refusals failing their own grounding check** (`adia/graph/nodes.py`): `validation_node` ran
+   every answer, refusals included, through the same numeric-claim check. A refusal cites zero
+   evidence by design, so any digit incidentally present in the feasibility agent's free-form
+   `reason` text (e.g. quoting "the next 6 months" from the question) had no possible citation
+   to match against and was flagged as an ungrounded claim — breaking an otherwise-correct
+   refusal and replacing it with the generic fallback message.
+3. **`compare_groups` O(n²) blowup on high-cardinality columns** (`adia/tools/compare_groups.py`):
+   grouping by a near-unique identifier (a real `CustomerID` column, 4,372 distinct values)
+   computed `pairwise_differences` for every unordered pair — 9.5 million entries from one call.
+   Beyond being wasteful, it was large enough (nearly all distinct floats, so bug (1)'s fix
+   alone didn't neutralize it) to still exhaust the validator's budget on its own.
+
+**Decision:**
+- `_walk_numeric` now spends budget only on a value genuinely new to the comparison set, never
+  on a revisit — a record's *distinct* value count is what's bounded, which is also the only
+  thing that could ever change whether some claimed number matches.
+- `validation_node` skips `validate_answer` entirely when `AgentState.refusal` is set, reporting
+  a trivially-passing `ValidationResult` instead — enforcing in code the invariant
+  `refusal_node`'s own docstring already claimed ("cites no evidence, so there is nothing
+  ungrounded to catch") rather than leaving it incidentally true only when the reason text
+  happened to be digit-free.
+- `compare_groups` now rejects a `group_column` with more than 50 distinct values outright, with
+  an actionable `ToolError` pointing at `segment_contribution` for a high-cardinality breakdown,
+  instead of silently computing a pathological result.
+
+**Alternatives considered:**
+- Raise `_MAX_WALK_NODES` instead of changing what it charges for — rejected: it delays the
+  failure mode rather than fixing it (a large enough record still starves everything else,
+  exactly as `compare_groups`-on-`CustomerID` proved even after the per-record accounting fix),
+  and a bigger shared budget makes a pathological single record slower to detect, not safer.
+- Special-case the validator to skip the numeric check whenever zero evidence is cited, for any
+  answer, not just refusals — rejected: that's a broader relaxation than the actual invariant
+  being restored (a *real* answer citing zero evidence while stating numbers is exactly the
+  `missing_evidence_reference` failure mode this validator is supposed to catch); gating the
+  skip on `state.refusal is not None` targets only the one path structurally guaranteed to
+  never need the check, per `refusal_node`'s own contract.
+- Cap `pairwise_differences` at some fixed count instead of rejecting the call — rejected:
+  a truncated, arbitrary subset of pairwise differences is a misleading partial result for a
+  comparison that's analytically meaningless in the first place (comparing thousands of
+  effectively single-row "groups" pairwise was never a sound operation); an explicit error that
+  suggests the right tool is more honest and more useful to a repair loop than a silently
+  incomplete answer.
+
+**Consequences:**
+All three fixes are covered by regression tests reproducing the exact failure shape (a
+duplicate-heavy large record starving a small one regardless of walk order; a refusal whose
+reason quotes a digit from the question; a 60-distinct-value column rejected, a 50-value one
+still accepted) — not just re-running the benchmark and hoping. Re-running
+`bench/tough_questions.json` after all three fixes: **30/30 completed, 30/30 passed
+validation**, 8/8 refusals correctly refused, 0/22 false refusals, zero forbidden causal
+phrases. Two further, real findings from the same run were reported but deliberately left
+unfixed here as LLM-output-quality issues rather than engine bugs: a generated `run_sql` query
+used `JULIANDAY(...)`, a SQLite function DuckDB doesn't have; and a churn-rate investigation
+chose `compare_groups` against the categorical `Churn` column, which requires a numeric metric.
+Both are candidates for a future Planner/Argument-Generator prompt refinement, in the same
+spirit as the derivable-metric rule above, not a validation-layer fix.
+
+---
+
 ## 2026-08-24: A tier-grouped evaluation report, not an LLM judge
 
 **Status:** Accepted

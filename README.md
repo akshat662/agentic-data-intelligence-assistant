@@ -167,6 +167,36 @@ From the most recent full benchmark run (`bench/results/evaluation_report.json`,
 
 Regenerate these numbers yourself: `python -m bench.runner` then `python -m bench.evaluation_report`.
 
+### Stress-Tested Across Datasets: `bench/tough_questions.json`
+
+A single-dataset benchmark at 100% validation risks reflecting a well-worn happy path more
+than genuine robustness. `bench/tough_questions.json` is a deliberately harder, 30-question
+suite spanning three datasets — the shipped `superstore`, the Telco Customer Churn dataset, and
+a ~540k-row UCI Online Retail dataset with no standalone `Sales` column (only
+`Quantity`/`UnitPrice`, to specifically stress-test derived-metric handling) — leaning into
+null handling, multi-condition filtering, date arithmetic, genuine ML `predictive` questions,
+and refusal edge cases (sentiment analysis, fields that don't exist, future forecasts).
+
+| Tier | Questions | Avg Plan Steps | Avg Evidence Coverage | Validation Pass Rate |
+|---|---|---|---|---|
+| **Direct** | 14 | 1.43 | 89.3% | 100% |
+| **Investigation** | 8 | 5.00 | 64.2% | 100% |
+| **Refusal** | 8 | 0.00 | N/A | 100% |
+
+**30/30 completed, 30/30 passed validation, 8/8 refusals correct, 0/22 false refusals** — but
+getting there is the more interesting part. The first run against this harder suite scored
+28/30, and chasing down *why* — not just re-running it — found three real, previously-unknown
+validation-layer bugs, none of them in the LLM's reasoning: the grounding validator's numeric
+check could be starved by one large, duplicate-heavy evidence record before a smaller cited
+record's genuinely distinct values were ever checked; a refusal could fail its own grounding
+check over an incidental digit quoted from the question, with zero evidence to blame it on;
+and `compare_groups` on a high-cardinality column (a real customer-ID field) computed 9.5
+million pairwise differences from one call. All three are fixed, covered by regression tests
+reproducing the exact failure shape, and written up in full — cause, fix, alternatives
+considered — in [`docs/DECISIONS.md`](docs/DECISIONS.md). See
+[`bench/README.md`](bench/README.md#the-stress-suite-benchtough_questionsjson) for how to run
+this suite yourself.
+
 ## Limitations
 
 Stated plainly, not buried in a caveat:
@@ -287,11 +317,14 @@ scripts/
                           #   for trying the Streamlit uploader without hunting for a CSV
 
 bench/
-    questions.json          # 25 questions: direct, investigation (root_cause), and refusal
+    questions.json          # 26 questions against superstore: direct, investigation, refusal
+    tough_questions.json     # 30 harder questions across 3 datasets — see "Evaluation Results"
     schema.py                # question contract + EvaluationTier + investigation metadata
-    runner.py                # drives every question through the real graph, records outcomes
+    runner.py                # drives a question set through the real graph; accepts an
+                              #   optional path arg to run a set other than questions.json
     evaluation_report.py     # tier-grouped comparison metrics, refusal correctness, causal-phrase scan
-    results/                 # generated output (gitignored): results.json, evaluation_report.{md,json}
+    results/                 # generated output (gitignored): results.json, evaluation_report.{md,json},
+                              #   and tough_questions_ prefixed equivalents for the harder set
 
 tests/          # one test file per adia/ and bench/ module — no real LLM calls in any test
 docs/           # DECISIONS.md (architecture decision log), ARCHITECTURE.md, INTERVIEW.md,
@@ -306,8 +339,11 @@ uv sync                          # install dependencies (core + dev)
 uv run pytest                    # run the test suite
 uv run ruff check .              # lint
 uv run python -m adia             # interactive CLI
+uv run streamlit run app.py                # browser UI
 uv run python -m bench.runner              # run the full benchmark against the real graph
 uv run python -m bench.evaluation_report   # generate the tier-grouped evaluation report
+uv run python -m bench.runner bench/tough_questions.json              # ...or the harder,
+uv run python -m bench.evaluation_report bench/tough_questions.json   #   cross-dataset suite
 ```
 
 See [`bench/README.md`](bench/README.md) for the benchmark's own design philosophy,

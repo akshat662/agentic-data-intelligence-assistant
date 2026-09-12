@@ -1,10 +1,12 @@
 # ADIA Benchmark
 
-> **Status: real dataset, real question set, real runner, real evaluation report.** The
-> `superstore` dataset is registered and profiled; `bench/questions.json` holds 25 real
-> questions against its actual schema; `bench/runner.py` drives every question through the
-> full LangGraph agent (real LLM calls); `bench/evaluation_report.py` turns the results into
-> tier-grouped comparison metrics. What's still not implemented is listed in
+> **Status: real datasets, real question sets, real runner, real evaluation report.**
+> `bench/questions.json` holds 26 real questions against the registered `superstore` dataset's
+> actual schema; a second, harder set — `bench/tough_questions.json`, 30 questions across three
+> datasets (see [below](#the-stress-suite-benchtough_questionsjson)) — stress-tests the same
+> pipeline further. `bench/runner.py` drives every question through the full LangGraph agent
+> (real LLM calls); `bench/evaluation_report.py` turns the results into tier-grouped comparison
+> metrics. What's still not implemented is listed in
 > [Implemented vs. Planned](#implemented-vs-planned) — most notably, independent gold/oracle
 > answers for numeric correctness grading.
 
@@ -88,7 +90,7 @@ phrases verbatim (case-insensitive), independent of and in addition to
 
 ## How the Pieces Fit Together
 
-- `bench/questions.json` — the question set (25 questions), validated by `bench/schema.py`'s
+- `bench/questions.json` — the question set (26 questions), validated by `bench/schema.py`'s
   `load_questions`. Every question names `dataset_id: "superstore"`, which resolves through
   the dataset registry at `data/registry.json`.
 - `bench/schema.py` — `BenchmarkQuestion`, `QuestionCategory`, `EvaluationTier`,
@@ -103,6 +105,40 @@ phrases verbatim (case-insensitive), independent of and in addition to
   (machine-readable), both gitignored — regenerate after every `bench.runner` run.
 - `data/registry.json`, `data/superstore.csv`, `data/catalog/superstore.json` — the
   registered, profiled evaluation dataset (see `data/README.md`).
+
+## The Stress Suite: `bench/tough_questions.json`
+
+A second, harder, cross-dataset question set — 30 questions, 10 each against `superstore`,
+`telco_churnn` (Telco Customer Churn), and `real_dataset` (the ~540k-row UCI Online Retail
+dataset, which has no standalone `Sales` column — only `Quantity`/`UnitPrice` — specifically to
+exercise the Planner's derived-metric handling; see `docs/DECISIONS.md`). It complements
+`bench/questions.json` rather than replacing it: where the original set established the
+baseline, this one deliberately leans into null handling (a blank `TotalCharges` for
+zero-tenure customers), multi-condition filtering, date arithmetic, genuine `predictive`
+(`train_model`) questions, and refusal edge cases (sentiment analysis, fields that don't exist,
+future forecasts) — the shapes of question most likely to expose an edge case the happy-path
+set wouldn't.
+
+Both `bench/runner.py` and `bench/evaluation_report.py` accept an optional question-set path as
+their first CLI argument:
+
+```bash
+uv run python -m bench.runner bench/tough_questions.json
+uv run python -m bench.evaluation_report bench/tough_questions.json
+```
+
+With no argument, both default to the original `bench/questions.json` path/behavior, unchanged.
+With a path argument, results and reports are written under a name derived from that file's
+stem (`bench/results/tough_questions_results.json`,
+`bench/results/tough_questions_evaluation_report.{md,json}`) — a non-default run never
+overwrites the canonical benchmark's own results.
+
+This suite is also what surfaced three real validation-layer bugs (a shared numeric-comparison
+budget one large evidence record could exhaust before a smaller cited record was ever checked;
+refusals failing their own grounding check over an incidental digit in the feasibility reason;
+`compare_groups` computing millions of pairwise differences for a high-cardinality column) — see
+`docs/DECISIONS.md` for the full write-up of each. After all three fixes: **30/30 completed,
+30/30 passed validation**, 8/8 refusals correctly refused, 0/22 false refusals.
 
 ## Implemented vs. Planned
 

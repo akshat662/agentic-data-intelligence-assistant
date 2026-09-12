@@ -24,27 +24,26 @@ This discipline is enforced structurally, not by convention:
   (`adia/validate/static.py`).
 
 The system is driven by a LangGraph state machine (`adia/graph/workflow.py`) over a single
-shared, typed state object (`adia.models.state.AgentState`), and is reachable through three
+shared, typed state object (`adia.models.state.AgentState`), and is reachable through four
 thin interfaces that all drive the identical `create_initial_state` → `run_graph` (or
-`stream_graph`) path: `adia/cli.py` (`python -m adia`), the FastAPI backend (`adia/api/`), and
-`bench/runner.py` for evaluation. Nothing about how the system answers a question differs
-between an interactive session, a browser, and a benchmark run — none of them contain
-feasibility, planning, tool-dispatch, or validation logic of their own.
+`stream_graph`) path: `adia/cli.py` (`python -m adia`), the Streamlit UI (`app.py`), the
+FastAPI backend (`adia/api/`), and `bench/runner.py` for evaluation. Nothing about how the
+system answers a question differs between an interactive session, the browser UI, and a
+benchmark run — none of them contain feasibility, planning, tool-dispatch, or validation logic
+of their own.
 
 ### Full-Stack Topology
 
-The graph above is the same regardless of caller; this is what sits in front of it when the
-caller is a browser rather than a terminal:
+The graph above is the same regardless of caller. `app.py` (Streamlit) is the primary way a
+browser reaches it today — a single process, calling `create_initial_state`/`stream_graph`
+directly in-process, with no separate backend to run:
 
 ```
         User
          │
          ▼
-   Frontend (web/ -- Next.js, TypeScript, Tailwind)
-         │  fetch + SSE: POST /chat, POST /chat/stream, POST /datasets
-         ▼
-   FastAPI (adia/api/ -- app.py, routes.py, service.py, schemas.py)
-         │  create_initial_state() -> run_graph() / stream_graph()
+   Streamlit UI (app.py)
+         │  create_initial_state() -> stream_graph()  (in-process, same Python interpreter)
          ▼
    LangGraph (adia/graph/)
          │
@@ -58,6 +57,20 @@ caller is a browser rather than a terminal:
    Evidence Store (adia/evidence/)
 ```
 
+The FastAPI backend (`adia/api/`) still exists as an independent, headless interface over the
+exact same graph — for a non-Streamlit client, or a future separate frontend — reachable the
+same way a browser-based Next.js frontend originally was, over `fetch`/SSE:
+
+```
+   Browser client
+         │  fetch + SSE: POST /chat, POST /chat/stream, POST /datasets
+         ▼
+   FastAPI (adia/api/ -- app.py, routes.py, service.py, schemas.py)
+         │  create_initial_state() -> run_graph() / stream_graph()
+         ▼
+   LangGraph (adia/graph/)   -- same as above
+```
+
 `adia/api/` is a thin interface layer only, by the same discipline as `adia/cli.py`: it has no
 feasibility, planning, tool-dispatch, or validation logic of its own (§9 has the full endpoint
 list and the SSE event contract). "Argument Generator" and "Tool Executor" are not separate
@@ -65,6 +78,12 @@ LangGraph nodes — they're `generate_tool_arguments` and the tool-dispatch half
 `execute_tools_node` respectively (§3's six real node names are the ones that matter for the
 graph itself); they're broken out here because they're the two places tool-specific reasoning
 and execution actually happen, which the six-node diagram in §3 doesn't distinguish.
+
+**History:** this system originally shipped with a Next.js frontend (`web/`) calling the
+FastAPI backend over `fetch`/SSE, matching the second diagram above. It was removed entirely
+in favor of `app.py` — see `docs/DECISIONS.md`'s entry on the Streamlit rewrite for why — but
+the FastAPI backend itself was kept as-is, so that second path is still real and usable, just
+no longer the primary one.
 
 ## 2. Component Architecture
 
@@ -98,13 +117,19 @@ adia/
     data/          # dataset registry + loading
     cli.py         # python -m adia -- a thin interface, no business logic
     api/           # FastAPI backend -- app.py, routes.py, service.py, schemas.py
-                   # (POST /chat, POST /chat/stream, POST /datasets, GET /health)
+                   # (POST /chat, POST /chat/stream, POST /datasets, GET /health) -- headless,
+                   # independent of the Streamlit UI below
 
-web/              # Next.js frontend (App Router, TypeScript, Tailwind)
-    app/, components/, lib/, hooks/    # see README.md "Project Structure" for the full layout
+app.py            # Streamlit UI -- the primary browser interface; drives the graph in-process,
+                   # no separate backend process required (see README.md "Running the
+                   # Streamlit UI"). Replaced a Next.js frontend (web/) that called adia/api/
+                   # over fetch/SSE -- removed entirely, see docs/DECISIONS.md.
+
+scripts/
+    download_dataset.py   # fetches a real ~540k-row CSV to try the Streamlit uploader with
 
 bench/
-    schema.py, questions.json, runner.py, evaluation_report.py
+    schema.py, questions.json, tough_questions.json, runner.py, evaluation_report.py
 ```
 
 Every arrow of dependency in this system points one way: `graph` calls `agents` and `tools`
@@ -237,12 +262,34 @@ own validator: `data`/`evidence_id`/`provenance` when `True`, `error: ToolError`
 
 | Tool | Computes | Notable output fields |
 |---|---|---|
-| `profile_dataset` | Dataset shape + per-column stats (`adia.data.catalog.build_catalog`, enriched) | `row_count`, `column_count`, `memory_bytes`, per-column `top_values` |
-| `run_sql` | A single guarded, read-only `SELECT` over the dataset via DuckDB | `rows`, `row_count`, `columns` |
-| `compare_groups` | Per-group count/mean/median/std plus pairwise mean differences | `groups`, `pairwise_differences`, `causal_claim_allowed: False` |
+| `profile_dataset` | Dataset shape + per-column stats (`adia.data.catalog.build_catalog`, enriched) | `row_count`, `column_count`, `memory_bytes`, per-column `top_values`, `column_names_preview` |
+| `run_sql` | A single guarded, read-only `SELECT` over the dataset via DuckDB | `rows`, `row_count`, `columns`, `rows_preview` |
+| `compare_groups` | Per-group count/mean/median/std plus pairwise mean differences, for a `group_column` with at most 50 distinct values | `groups`, `pairwise_differences`, `causal_claim_allowed: False` |
 | `compute_correlation` | Pairwise Pearson correlation between numeric columns | `matrix`, `pairs`, `causal_claim_allowed: False` |
 | `train_model` | One fixed-hyperparameter scikit-learn model vs. a naive baseline on a held-out split | `metric_value`, `baseline_metric_value`, `feature_importance` |
 | `segment_contribution` | Ranks each entity's count/total/mean/share of a metric's total, optionally scoped to one parent value (e.g. Sub-Category within `Category == "Technology"`) | `entities` (`rank`, `total`, `share_of_total`, ...), `overall_total`, `causal_claim_allowed: False` |
+
+`rows_preview` and `column_names_preview` exist because of a subtle interaction with the
+evidence renderer (§6): `adia.evidence.renderer`'s generic list-summarization deliberately
+collapses any list over 10 items down to a bare count (so one tool's huge result can't blow up
+every other evidence record's rendered size) — which silently left the Synthesizer with a row
+or column *count* and no actual values for any `run_sql` result over 10 rows, or any dataset
+with more than 10 columns, no matter how small the result genuinely was. Both fields are plain
+strings (a Markdown table, and a comma-separated name list respectively, each capped
+separately from the renderer's own limit), so they survive that generic collapsing untouched
+and always reach the Synthesizer's prompt. `data["rows"]`/`data["column_names"]` are left
+completely unbounded — the previews are additive, not a replacement, and grounding validation
+(§8) checks claims against the real, unbounded data, not the preview text.
+
+`compare_groups`'s 50-group cap exists because `pairwise_differences` is one entry per
+*unordered pair* of groups — O(n²) in `group_column`'s distinct-value count. A genuinely
+categorical business dimension (Region, Category, Segment, Country) fits comfortably under 50;
+a near-unique identifier (a customer ID, an order ID) does not — one real run against a
+541k-row dataset grouped by `CustomerID` (4,372 distinct values) produced **9.5 million**
+pairwise differences from a single tool call, expensive to compute, huge to store as evidence,
+and large enough on its own to exhaust the grounding validator's numeric-comparison budget
+(§8) before any other cited evidence was ever checked. Rejected outright with an actionable
+`ToolError`, not silently truncated.
 
 `run_sql` is the only tool that accepts free-form input; every query passes through
 `adia.tools.sql_guard.check_sql` first, which parses it with `sqlglot`, rejects anything that
@@ -341,7 +388,7 @@ non-causal language, and, where the evidence doesn't settle the question, says s
 ### Validation
 
 `adia.validate.static.validate_answer(text, evidence)` (unchanged by, and independent of, the
-investigation work above) is the single mechanical gate every answer passes through. It:
+investigation work above) is the single mechanical gate every real answer passes through. It:
 extracts every `[[...]]` citation marker and classifies each as valid, malformed (not a real
 evidence-ID shape), or dangling (well-formed but matching no record in `evidence`); extracts
 every number-shaped token in the text (masking citation markers first so digits inside an ID
@@ -353,16 +400,33 @@ record's `data` explicitly sets `causal_claim_allowed: False`. `ValidationResult
 `False` if any check produced a failing issue — every issue this layer raises is a hard
 failure, not advice.
 
+The numeric walk shares one bounded budget (`_MAX_WALK_NODES`, 5,000) across every cited
+evidence record, but only charges it for a value genuinely new to the comparison set, never for
+revisiting one already collected. This matters because `citation_ids` is a `set` — the order
+its members get walked in is unspecified — and a large, duplicate-heavy record (a `run_sql`
+result with thousands of rows but a handful of distinct values in most columns) could otherwise
+exhaust the whole budget on repeat visits before a different, smaller cited record's genuinely
+distinct values were ever reached, nondeterministically flagging that second record's correctly
+cited number as unsupported depending on iteration order alone. A cross-dataset stress run
+(`bench/tough_questions.json`) is what surfaced this; see `docs/DECISIONS.md`.
+
 ### Refusal Handling
 
 A non-`FEASIBLE` verdict never reaches the planner or the tool layer at all —
 `route_after_feasibility` sends it straight to `refusal_node`, which composes its answer
 purely from what `feasibility_node` already determined and verified in Python
 (`FeasibilityResult.reason`, `.missing_columns`, `.missing_capabilities`). It invents nothing
-and cites no evidence, so it has nothing ungrounded for `validation_node` to catch, and it
-still passes through that same node like every other answer. `AgentState.refusal` is set to
-the triggering `FeasibilityResult`, distinguishing a refusal from an answer even though both
-populate `final_answer`.
+and cites no evidence, so there is nothing ungrounded in it for a *grounding* check to catch —
+and `validation_node` now enforces exactly that by construction: when `AgentState.refusal` is
+set, it skips `validate_answer` entirely and reports a trivially-passing `ValidationResult`,
+rather than running the refusal text through the same numeric-claim check a real answer gets.
+This isn't just an optimization: with zero cited evidence, that check has no way to tell a
+digit incidentally present in the feasibility agent's free-form `reason` prose (e.g. explaining
+there's no data for "the next 6 months," quoting the question) from a genuine ungrounded claim
+— every such digit used to be flagged, intermittently breaking otherwise-correct refusals for
+reasons unrelated to their actual correctness. `AgentState.refusal` is set to the triggering
+`FeasibilityResult`, distinguishing a refusal from an answer even though both populate
+`final_answer`.
 
 ### Unsupported Causal Claim Handling
 
@@ -380,13 +444,27 @@ only a request made of the LLM: an answer that ignores the prompt and claims cau
 `compare_groups` or `compute_correlation` result fails validation and is replaced by the fixed
 fallback answer, the same as any other ungrounded claim.
 
-## 9. API and Frontend Layer
+## 9. UI, API, and Frontend Layer
+
+### Streamlit UI (`app.py`) — the primary browser interface
+
+`app.py` calls `create_initial_state`/`stream_graph` directly in the same Python process
+Streamlit runs in — no HTTP hop, no separate backend to keep running alongside it. Dataset
+upload reuses `adia.api.service.register_dataset` directly for the same reason. It streams the
+graph's node-by-node progress into an expandable "agent steps" panel the same way
+`POST /chat/stream` does for an HTTP client (see below) — same events, different transport —
+and renders the final, already-validated answer plus its cited evidence once `validation_node`
+completes. See the root [`README.md`](../README.md)'s "Running the Streamlit UI" section.
+
+### FastAPI backend (`adia/api/`) — headless, independent of the UI above
 
 `adia/api/` is a thin FastAPI interface over the exact same graph, following the same
 "no business logic in the interface" discipline as `adia/cli.py`: `routes.py` only validates
 input and translates exceptions to HTTP responses, `service.py` calls
 `create_initial_state`/`run_graph`/`stream_graph` and shapes the result, `schemas.py` holds
-request/response contracts.
+request/response contracts. `app.py` (Streamlit) does not call this API and does not require it
+to be running — it exists for a non-Streamlit client, or a future separate frontend, not as a
+dependency of the UI above.
 
 | Endpoint | Purpose |
 |---|---|
@@ -416,10 +494,10 @@ this system exists to make. The stream instead narrates *progress* (which node j
 which evidence was just produced) live, and delivers the final answer as a single,
 already-validated chunk once `validation` completes.
 
-`web/` (Next.js, App Router, TypeScript, Tailwind) is a thin client of this API: `lib/api.ts`
-wraps the two calls above, `lib/sse.ts` parses the streamed frames, `hooks/useChat.ts` holds
-the running transcript in a `useReducer` (no server-side session — every `/chat/stream` call
-is an independent, stateless graph run; the frontend's "chat session" is a client-side-only
-list of past turns, not real conversational memory fed back into the LLM). See the root
-[`README.md`](../README.md)'s "Project Structure" and "Deployment" sections for the full
-component list and how to run or deploy both halves.
+Either interface's "chat session" is stateless server-side: every `/chat/stream` call, and
+every question asked through `app.py`, is an independent graph run — no conversational memory
+is fed back into the LLM between turns. `app.py` keeps its own visible transcript in
+`st.session_state` purely for display, the same role a Next.js frontend's client-side
+`useReducer` transcript originally played against this same API before it was replaced (see
+`docs/DECISIONS.md`). See the root [`README.md`](../README.md)'s "Project Structure" and
+"Deployment" sections for the full component list and how to run or deploy either interface.
