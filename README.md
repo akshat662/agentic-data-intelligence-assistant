@@ -260,13 +260,9 @@ in the first), 5 evidence records, one validated, hedged, non-causal answer.
 
 ### Screenshots
 
-| | |
-|---|---|
-| **Chat interface** ![Chat interface](docs/screenshots/01-chat-interface.png) | **Streaming progress timeline** ![Progress timeline](docs/screenshots/02-progress-timeline.png) |
-| **Evidence panel** ![Evidence panel](docs/screenshots/03-evidence-panel.png) | **Final validated answer** ![Final answer](docs/screenshots/04-final-answer.png) |
-
-**Investigation example** (the Technology question above, running live in the frontend):
-![Investigation example](docs/screenshots/05-investigation-example.png)
+*(Pending — the previous screenshots here were of the retired Next.js frontend; see
+[`docs/DECISIONS.md`](docs/DECISIONS.md). Fresh screenshots of the Streamlit UI (`app.py`) will
+replace this note.)*
 
 ### Bonus — Unsupported question (refusal)
 
@@ -327,8 +323,7 @@ bench/
                               #   and tough_questions_ prefixed equivalents for the harder set
 
 tests/          # one test file per adia/ and bench/ module — no real LLM calls in any test
-docs/           # DECISIONS.md (architecture decision log), ARCHITECTURE.md, INTERVIEW.md,
-                #   screenshots/ (see "Demo Walkthrough" above)
+docs/           # DECISIONS.md (architecture decision log), ARCHITECTURE.md, INTERVIEW.md
 data/           # the registered superstore dataset + its generated catalog
 ```
 
